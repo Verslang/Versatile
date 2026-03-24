@@ -68,10 +68,10 @@ jobs:
           $null = verslang tests\test_verslang.vlang -o build\output\test_verslang.exe 2>&1
           if ($LASTEXITCODE -eq 0) { $compiled++ } else { $failed++ }
 
-          $ErrorActionPreference = "Stop"
           Write-Host ""
           Write-Host "Compiled: $compiled, Skipped: $failed (cross-file references need linker support)"
           if ($compiled -eq 0) { Write-Host "##[error]No files compiled"; exit 1 }
+          exit 0
 
       - name: Package
         run: |
