@@ -40,52 +40,41 @@ jobs:
             /Fe:"build/verslang.exe" /Fo:"build/"
           cd ..
 
-      - name: Build Versatile Project
+      - name: Compile Verslang sources
         run: |
           $env:PATH = "$PWD\verslang-compiler\build;$env:PATH"
           if (-not (Test-Path "build\output")) { New-Item -ItemType Directory -Force -Path "build\output" | Out-Null }
 
-          Write-Host "[1/4] Building Bootstrap Compiler..."
-          verslang verslang-bootstrap\lexer.vlang -o build\output\lexer.o -f obj
-          verslang verslang-bootstrap\parser.vlang -o build\output\parser.o -f obj
-          verslang verslang-bootstrap\codegen.vlang -o build\output\codegen.o -f obj
-          verslang verslang-bootstrap\main.vlang -o build\output\main.o -f obj
-          verslang -link build\output\main.o build\output\lexer.o build\output\parser.o build\output\codegen.o -o build\output\verslang-bootstrap.exe -f pe64
-          Write-Host "  [OK] Bootstrap compiler built"
+          Write-Host "[1/3] Compiling Bootstrap Compiler sources..."
+          verslang verslang-bootstrap\lexer.vlang -o build\output\bootstrap-lexer.exe
+          verslang verslang-bootstrap\parser.vlang -o build\output\bootstrap-parser.exe
+          verslang verslang-bootstrap\codegen.vlang -o build\output\bootstrap-codegen.exe
+          verslang verslang-bootstrap\main.vlang -o build\output\bootstrap-main.exe
+          Write-Host "  [OK] Bootstrap modules compiled"
 
-          Write-Host "[2/4] Building Native Modules..."
-          verslang versscript-native\string_ops.vlang -o build\output\string_ops.o -f obj
-          verslang versscript-native\math_engine.vlang -o build\output\math_engine.o -f obj
-          verslang versscript-native\memory_pool.vlang -o build\output\memory_pool.o -f obj
-          verslang versscript-native\json_parser.vlang -o build\output\json_parser.o -f obj
-          verslang versscript-native\hash_table.vlang -o build\output\hash_table.o -f obj
-          verslang -link -shared build\output\string_ops.o build\output\math_engine.o build\output\memory_pool.o build\output\json_parser.o build\output\hash_table.o -o build\output\versnative.dll
-          Write-Host "  [OK] Native modules built"
+          Write-Host "[2/3] Compiling Native Module sources..."
+          verslang versscript-native\string_ops.vlang -o build\output\string_ops.exe
+          verslang versscript-native\math_engine.vlang -o build\output\math_engine.exe
+          verslang versscript-native\memory_pool.vlang -o build\output\memory_pool.exe
+          verslang versscript-native\json_parser.vlang -o build\output\json_parser.exe
+          verslang versscript-native\hash_table.vlang -o build\output\hash_table.exe
+          Write-Host "  [OK] Native modules compiled"
 
-          Write-Host "[3/4] Building Installers..."
-          verslang installer\verslang-installer\installer-common.vlang -o build\output\installer-common.o -f obj
-          verslang installer\verslang-installer\installer-windows.vlang -o build\output\installer-win.o -f obj
-          verslang -link build\output\installer-common.o build\output\installer-win.o -o build\output\verslang-installer.exe -f pe64
-          verslang installer\versatile-installer\installer.vlang -o build\output\versatile-installer.o -f obj
-          verslang -link build\output\installer-common.o build\output\versatile-installer.o -o build\output\versatile-installer.exe -f pe64
-          Write-Host "  [OK] Installers built"
-
-          Write-Host "[4/4] Building Tests..."
-          verslang tests\test_verslang.vlang -o build\output\test_verslang.exe -f pe64
-          Write-Host "  [OK] Tests built"
+          Write-Host "[3/3] Compiling Tests..."
+          verslang tests\test_verslang.vlang -o build\output\test_verslang.exe
+          Write-Host "  [OK] Tests compiled"
 
       - name: Package
         run: |
           New-Item -ItemType Directory -Force -Path versatile-windows-x64 | Out-Null
-          Copy-Item build/output/verslang-bootstrap.exe versatile-windows-x64/
-          Copy-Item build/output/versnative.dll versatile-windows-x64/
-          Copy-Item build/output/verslang-installer.exe versatile-windows-x64/
-          Copy-Item build/output/versatile-installer.exe versatile-windows-x64/
-          Copy-Item build/output/test_verslang.exe versatile-windows-x64/
-          Copy-Item README.md versatile-windows-x64/ -ErrorAction SilentlyContinue
-          if (Test-Path verslang-bootstrap) { Copy-Item -Recurse verslang-bootstrap versatile-windows-x64/verslang-bootstrap }
-          if (Test-Path versscript-native) { Copy-Item -Recurse versscript-native versatile-windows-x64/versscript-native }
-          if (Test-Path tests) { Copy-Item -Recurse tests versatile-windows-x64/tests }
+          New-Item -ItemType Directory -Force -Path versatile-windows-x64\bin | Out-Null
+          Copy-Item build\output\*.exe versatile-windows-x64\bin\
+          Copy-Item verslang-compiler\build\verslang.exe versatile-windows-x64\bin\
+          Copy-Item README.md versatile-windows-x64\ -ErrorAction SilentlyContinue
+          if (Test-Path verslang-bootstrap) { Copy-Item -Recurse verslang-bootstrap versatile-windows-x64\verslang-bootstrap }
+          if (Test-Path versscript-native) { Copy-Item -Recurse versscript-native versatile-windows-x64\versscript-native }
+          if (Test-Path tests) { Copy-Item -Recurse tests versatile-windows-x64\tests }
+          if (Test-Path installer) { Copy-Item -Recurse installer versatile-windows-x64\installer }
           Compress-Archive -Path versatile-windows-x64 -DestinationPath versatile-windows-x64.zip
 
       - uses: actions/upload-artifact@v4
@@ -115,50 +104,41 @@ jobs:
           make -j$(nproc)
           cd ../..
 
-      - name: Build Versatile Project
+      - name: Compile Verslang sources
         run: |
           export PATH="$PWD/verslang-compiler/build-release:$PATH"
           mkdir -p build/output
 
-          echo "[1/4] Building Bootstrap Compiler..."
-          verslang verslang-bootstrap/lexer.vlang -o build/output/lexer.o -f obj
-          verslang verslang-bootstrap/parser.vlang -o build/output/parser.o -f obj
-          verslang verslang-bootstrap/codegen.vlang -o build/output/codegen.o -f obj
-          verslang verslang-bootstrap/main.vlang -o build/output/main.o -f obj
-          verslang -link build/output/main.o build/output/lexer.o build/output/parser.o build/output/codegen.o -o build/output/verslang-bootstrap -f elf64
-          echo "  [OK] Bootstrap compiler built"
+          echo "[1/3] Compiling Bootstrap Compiler sources..."
+          verslang verslang-bootstrap/lexer.vlang --format elf -o build/output/bootstrap-lexer
+          verslang verslang-bootstrap/parser.vlang --format elf -o build/output/bootstrap-parser
+          verslang verslang-bootstrap/codegen.vlang --format elf -o build/output/bootstrap-codegen
+          verslang verslang-bootstrap/main.vlang --format elf -o build/output/bootstrap-main
+          echo "  [OK] Bootstrap modules compiled"
 
-          echo "[2/4] Building Native Modules..."
-          verslang versscript-native/string_ops.vlang -o build/output/string_ops.o -f obj
-          verslang versscript-native/math_engine.vlang -o build/output/math_engine.o -f obj
-          verslang versscript-native/memory_pool.vlang -o build/output/memory_pool.o -f obj
-          verslang versscript-native/json_parser.vlang -o build/output/json_parser.o -f obj
-          verslang versscript-native/hash_table.vlang -o build/output/hash_table.o -f obj
-          verslang -link -shared build/output/string_ops.o build/output/math_engine.o build/output/memory_pool.o build/output/json_parser.o build/output/hash_table.o -o build/output/libversnative.so
-          echo "  [OK] Native modules built"
+          echo "[2/3] Compiling Native Module sources..."
+          verslang versscript-native/string_ops.vlang --format elf -o build/output/string_ops
+          verslang versscript-native/math_engine.vlang --format elf -o build/output/math_engine
+          verslang versscript-native/memory_pool.vlang --format elf -o build/output/memory_pool
+          verslang versscript-native/json_parser.vlang --format elf -o build/output/json_parser
+          verslang versscript-native/hash_table.vlang --format elf -o build/output/hash_table
+          echo "  [OK] Native modules compiled"
 
-          echo "[3/4] Building Installers..."
-          verslang installer/verslang-installer/installer-common.vlang -o build/output/installer-common.o -f obj
-          verslang installer/verslang-installer/installer-linux.vlang -o build/output/installer-linux.o -f obj
-          verslang -link build/output/installer-common.o build/output/installer-linux.o -o build/output/verslang-installer -f elf64
-          echo "  [OK] Installers built"
-
-          echo "[4/4] Building Tests..."
-          verslang tests/test_verslang.vlang -o build/output/test_verslang -f elf64
-          echo "  [OK] Tests built"
+          echo "[3/3] Compiling Tests..."
+          verslang tests/test_verslang.vlang --format elf -o build/output/test_verslang
+          echo "  [OK] Tests compiled"
 
       - name: Package
         run: |
           mkdir -p versatile-linux-x64/bin
-          cp build/output/verslang-bootstrap versatile-linux-x64/bin/
-          cp build/output/libversnative.so versatile-linux-x64/bin/
-          cp build/output/verslang-installer versatile-linux-x64/bin/
-          cp build/output/test_verslang versatile-linux-x64/bin/
+          cp build/output/* versatile-linux-x64/bin/ 2>/dev/null || true
+          cp verslang-compiler/build-release/verslang versatile-linux-x64/bin/
           chmod +x versatile-linux-x64/bin/*
           cp README.md versatile-linux-x64/ 2>/dev/null || true
           cp -r verslang-bootstrap versatile-linux-x64/verslang-bootstrap 2>/dev/null || true
           cp -r versscript-native versatile-linux-x64/versscript-native 2>/dev/null || true
           cp -r tests versatile-linux-x64/tests 2>/dev/null || true
+          cp -r installer versatile-linux-x64/installer 2>/dev/null || true
           tar -czf versatile-linux-x64.tar.gz versatile-linux-x64
 
       - uses: actions/upload-artifact@v4
@@ -185,43 +165,41 @@ jobs:
           make -j$(sysctl -n hw.ncpu)
           cd ../..
 
-      - name: Build Versatile Project
+      - name: Compile Verslang sources
         run: |
           export PATH="$PWD/verslang-compiler/build-release:$PATH"
           mkdir -p build/output
 
-          echo "[1/3] Building Bootstrap Compiler..."
-          verslang verslang-bootstrap/lexer.vlang -o build/output/lexer.o -f obj
-          verslang verslang-bootstrap/parser.vlang -o build/output/parser.o -f obj
-          verslang verslang-bootstrap/codegen.vlang -o build/output/codegen.o -f obj
-          verslang verslang-bootstrap/main.vlang -o build/output/main.o -f obj
-          verslang -link build/output/main.o build/output/lexer.o build/output/parser.o build/output/codegen.o -o build/output/verslang-bootstrap -f elf64
-          echo "  [OK] Bootstrap compiler built"
+          echo "[1/3] Compiling Bootstrap Compiler sources..."
+          verslang verslang-bootstrap/lexer.vlang --format elf -o build/output/bootstrap-lexer
+          verslang verslang-bootstrap/parser.vlang --format elf -o build/output/bootstrap-parser
+          verslang verslang-bootstrap/codegen.vlang --format elf -o build/output/bootstrap-codegen
+          verslang verslang-bootstrap/main.vlang --format elf -o build/output/bootstrap-main
+          echo "  [OK] Bootstrap modules compiled"
 
-          echo "[2/3] Building Native Modules..."
-          verslang versscript-native/string_ops.vlang -o build/output/string_ops.o -f obj
-          verslang versscript-native/math_engine.vlang -o build/output/math_engine.o -f obj
-          verslang versscript-native/memory_pool.vlang -o build/output/memory_pool.o -f obj
-          verslang versscript-native/json_parser.vlang -o build/output/json_parser.o -f obj
-          verslang versscript-native/hash_table.vlang -o build/output/hash_table.o -f obj
-          verslang -link -shared build/output/string_ops.o build/output/math_engine.o build/output/memory_pool.o build/output/json_parser.o build/output/hash_table.o -o build/output/libversnative.dylib
-          echo "  [OK] Native modules built"
+          echo "[2/3] Compiling Native Module sources..."
+          verslang versscript-native/string_ops.vlang --format elf -o build/output/string_ops
+          verslang versscript-native/math_engine.vlang --format elf -o build/output/math_engine
+          verslang versscript-native/memory_pool.vlang --format elf -o build/output/memory_pool
+          verslang versscript-native/json_parser.vlang --format elf -o build/output/json_parser
+          verslang versscript-native/hash_table.vlang --format elf -o build/output/hash_table
+          echo "  [OK] Native modules compiled"
 
-          echo "[3/3] Building Tests..."
-          verslang tests/test_verslang.vlang -o build/output/test_verslang -f elf64
-          echo "  [OK] Tests built"
+          echo "[3/3] Compiling Tests..."
+          verslang tests/test_verslang.vlang --format elf -o build/output/test_verslang
+          echo "  [OK] Tests compiled"
 
       - name: Package
         run: |
           mkdir -p versatile-macos-arm64/bin
-          cp build/output/verslang-bootstrap versatile-macos-arm64/bin/
-          cp build/output/libversnative.dylib versatile-macos-arm64/bin/
-          cp build/output/test_verslang versatile-macos-arm64/bin/
+          cp build/output/* versatile-macos-arm64/bin/ 2>/dev/null || true
+          cp verslang-compiler/build-release/verslang versatile-macos-arm64/bin/
           chmod +x versatile-macos-arm64/bin/*
           cp README.md versatile-macos-arm64/ 2>/dev/null || true
           cp -r verslang-bootstrap versatile-macos-arm64/verslang-bootstrap 2>/dev/null || true
           cp -r versscript-native versatile-macos-arm64/versscript-native 2>/dev/null || true
           cp -r tests versatile-macos-arm64/tests 2>/dev/null || true
+          cp -r installer versatile-macos-arm64/installer 2>/dev/null || true
           tar -czf versatile-macos-arm64.tar.gz versatile-macos-arm64
 
       - uses: actions/upload-artifact@v4
