@@ -1,0 +1,632 @@
+§ ============================================================================
+§ Verslang Bootstrap Compiler: Main Entry Point
+§ Self-hosting compiler that reads .vlang source and emits machine code
+§ This is the entry point that ties lexer, parser, and codegen together
+§ Compile: verslang main.vlang lexer.vlang parser.vlang codegen.vlang -o verslang-bootstrap
+§ ============================================================================
+
+§ --- Version ---
+
+constant VERSION_MAJOR: u32 = 1
+constant VERSION_MINOR: u32 = 0
+constant VERSION_PATCH: u32 = 0
+
+§ --- Command-Line Options ---
+
+enumeration OutputTarget {
+    Executable = 0,
+    ObjectFile = 1,
+    FlatBinary = 2,
+    Assembly = 3
+}
+
+structure CompilerOptions {
+    input_file: ptr<u8>,
+    input_length: u64,
+    output_file: ptr<u8>,
+    output_length: u64,
+    target: OutputTarget,
+    format: OutputFormat,
+    verbose: bool,
+    optimize: bool,
+    debug_info: bool
+}
+
+§ --- Platform-Specific I/O ---
+
+when platform == "linux" {
+    function sys_write(fd: i32, buf: ptr<u8>, count: u64): i64 {
+        declare result: i64
+        assembly {
+            "mov rax, 1"
+            "mov edi, %[fd]"
+            "mov rsi, %[buf]"
+            "mov rdx, %[count]"
+            "syscall"
+            "mov %[result], rax"
+        }
+        return result
+    }
+
+    function sys_read(fd: i32, buf: ptr<u8>, count: u64): i64 {
+        declare result: i64
+        assembly {
+            "mov rax, 0"
+            "mov edi, %[fd]"
+            "mov rsi, %[buf]"
+            "mov rdx, %[count]"
+            "syscall"
+            "mov %[result], rax"
+        }
+        return result
+    }
+
+    function sys_open(path: ptr<u8>, flags: i32, mode: i32): i32 {
+        declare result: i32
+        assembly {
+            "mov rax, 2"
+            "mov rdi, %[path]"
+            "mov esi, %[flags]"
+            "mov edx, %[mode]"
+            "syscall"
+            "mov %[result], eax"
+        }
+        return result
+    }
+
+    function sys_close(fd: i32): void {
+        assembly {
+            "mov rax, 3"
+            "mov edi, %[fd]"
+            "syscall"
+        }
+    }
+
+    function sys_fstat_size(fd: i32): u64 {
+        § Use fstat to get file size
+        declare stat_buf: array<u8, 144>  § struct stat size on x86-64 Linux
+        declare result: i64
+        assembly {
+            "mov rax, 5"
+            "mov edi, %[fd]"
+            "lea rsi, %[stat_buf]"
+            "syscall"
+            "mov %[result], rax"
+        }
+        if (result < 0) { return 0 }
+        § st_size is at offset 48 in struct stat
+        declare size_ptr: ptr<u64> = cast<ptr<u64>>(cast<u64>(address_of(stat_buf)) + 48)
+        return dereference(size_ptr)
+    }
+
+    function sys_mmap(size: u64): ptr<u8> {
+        declare result: u64
+        assembly {
+            "mov rax, 9"
+            "xor rdi, rdi"
+            "mov rsi, %[size]"
+            "mov rdx, 3"
+            "mov r10, 34"
+            "mov r8, -1"
+            "xor r9, r9"
+            "syscall"
+            "mov %[result], rax"
+        }
+        return cast<ptr<u8>>(result)
+    }
+
+    function sys_exit(code: i32): void {
+        assembly {
+            "mov rax, 60"
+            "mov edi, %[code]"
+            "syscall"
+        }
+    }
+
+    function print(msg: ptr<u8>, len: u64): void {
+        sys_write(1, msg, len)
+    }
+
+    function print_error(msg: ptr<u8>, len: u64): void {
+        sys_write(2, msg, len)
+    }
+
+    function read_file(path: ptr<u8>): ptr<u8> {
+        declare fd: i32 = sys_open(path, 0, 0)  § O_RDONLY
+        if (fd < 0) { return cast<ptr<u8>>(0) }
+
+        declare size: u64 = sys_fstat_size(fd)
+        if (size == 0) { sys_close(fd); return cast<ptr<u8>>(0) }
+
+        declare buf: ptr<u8> = sys_mmap(size + 1)
+        declare bytes_read: i64 = sys_read(fd, buf, size)
+        sys_close(fd)
+
+        if (bytes_read < 0) { return cast<ptr<u8>>(0) }
+        § Null terminate
+        dereference(cast<ptr<u8>>(cast<u64>(buf) + cast<u64>(bytes_read))) = 0
+        return buf
+    }
+
+    function write_file(path: ptr<u8>, data: ptr<u8>, size: u64): bool {
+        § O_WRONLY | O_CREAT | O_TRUNC = 0x241
+        declare fd: i32 = sys_open(path, 0x241, 0x1ED)  § mode 0755
+        if (fd < 0) { return false }
+        declare written: i64 = sys_write(fd, data, size)
+        sys_close(fd)
+        return written == cast<i64>(size)
+    }
+}
+
+when platform == "windows" {
+    external function GetStdHandle(nStdHandle: i32): u64
+    external function WriteConsoleA(handle: u64, buf: ptr<u8>, count: u32, written: ptr<u32>, reserved: ptr<u8>): bool
+    external function CreateFileA(name: ptr<u8>, access: u32, share: u32, security: ptr<u8>, creation: u32, flags: u32, template: u64): u64
+    external function ReadFile(handle: u64, buf: ptr<u8>, count: u32, read: ptr<u32>, overlapped: ptr<u8>): bool
+    external function WriteFile(handle: u64, buf: ptr<u8>, count: u32, written: ptr<u32>, overlapped: ptr<u8>): bool
+    external function CloseHandle(handle: u64): bool
+    external function GetFileSize(handle: u64, high: ptr<u32>): u32
+    external function VirtualAlloc(addr: ptr<u8>, size: u64, type: u32, protect: u32): ptr<u8>
+    external function ExitProcess(code: u32): void
+
+    constant STD_OUTPUT: i32 = -11
+    constant STD_ERROR: i32 = -12
+    constant GENERIC_READ: u32 = 0x80000000
+    constant GENERIC_WRITE: u32 = 0x40000000
+    constant OPEN_EXISTING: u32 = 3
+    constant CREATE_ALWAYS: u32 = 2
+
+    function print(msg: ptr<u8>, len: u64): void {
+        declare handle: u64 = GetStdHandle(STD_OUTPUT)
+        declare written: u32 = 0
+        WriteConsoleA(handle, msg, cast<u32>(len), address_of(written), cast<ptr<u8>>(0))
+    }
+
+    function print_error(msg: ptr<u8>, len: u64): void {
+        declare handle: u64 = GetStdHandle(STD_ERROR)
+        declare written: u32 = 0
+        WriteConsoleA(handle, msg, cast<u32>(len), address_of(written), cast<ptr<u8>>(0))
+    }
+
+    function read_file(path: ptr<u8>): ptr<u8> {
+        declare handle: u64 = CreateFileA(path, GENERIC_READ, 1, cast<ptr<u8>>(0), OPEN_EXISTING, 0, 0)
+        if (handle == 0xFFFFFFFFFFFFFFFF) { return cast<ptr<u8>>(0) }
+
+        declare size: u32 = GetFileSize(handle, cast<ptr<u32>>(0))
+        declare buf: ptr<u8> = VirtualAlloc(cast<ptr<u8>>(0), cast<u64>(size) + 1, 0x3000, 0x04)
+        declare bytes_read: u32 = 0
+        ReadFile(handle, buf, size, address_of(bytes_read), cast<ptr<u8>>(0))
+        CloseHandle(handle)
+
+        dereference(cast<ptr<u8>>(cast<u64>(buf) + cast<u64>(bytes_read))) = 0
+        return buf
+    }
+
+    function write_file(path: ptr<u8>, data: ptr<u8>, size: u64): bool {
+        declare handle: u64 = CreateFileA(path, GENERIC_WRITE, 0, cast<ptr<u8>>(0), CREATE_ALWAYS, 0x80, 0)
+        if (handle == 0xFFFFFFFFFFFFFFFF) { return false }
+        declare written: u32 = 0
+        WriteFile(handle, data, cast<u32>(size), address_of(written), cast<ptr<u8>>(0))
+        CloseHandle(handle)
+        return cast<u64>(written) == size
+    }
+
+    function sys_exit(code: i32): void {
+        ExitProcess(cast<u32>(code))
+    }
+}
+
+§ --- String Utilities ---
+
+function str_len(s: ptr<u8>): u64 {
+    declare len: u64 = 0
+    while (dereference(cast<ptr<u8>>(cast<u64>(s) + len)) != 0) {
+        len = len + 1
+    }
+    return len
+}
+
+function str_eq(a: ptr<u8>, a_len: u64, b: ptr<u8>, b_len: u64): bool {
+    if (a_len != b_len) { return false }
+    for (declare i: u64 = 0; i < a_len; i = i + 1) {
+        if (dereference(cast<ptr<u8>>(cast<u64>(a) + i)) != dereference(cast<ptr<u8>>(cast<u64>(b) + i))) {
+            return false
+        }
+    }
+    return true
+}
+
+function str_ends_with(s: ptr<u8>, s_len: u64, suffix: ptr<u8>, suffix_len: u64): bool {
+    if (suffix_len > s_len) { return false }
+    declare offset: u64 = s_len - suffix_len
+    return str_eq(
+        cast<ptr<u8>>(cast<u64>(s) + offset), suffix_len,
+        suffix, suffix_len
+    )
+}
+
+§ --- Print Helpers ---
+
+function print_str(s: ptr<u8>): void {
+    print(s, str_len(s))
+}
+
+function print_newline(): void {
+    declare nl: array<u8, 1> = "\n"
+    print(cast<ptr<u8>>(address_of(nl)), 1)
+}
+
+function print_u32(val: u32): void {
+    if (val == 0) {
+        declare zero: array<u8, 1> = "0"
+        print(cast<ptr<u8>>(address_of(zero)), 1)
+        return
+    }
+    declare buf: array<u8, 10>
+    declare pos: i32 = 9
+    declare v: u32 = val
+    while (v > 0 && pos >= 0) {
+        buf[cast<u64>(pos)] = cast<u8>(48 + (v % 10))
+        v = v / 10
+        pos = pos - 1
+    }
+    pos = pos + 1
+    print(cast<ptr<u8>>(cast<u64>(address_of(buf)) + cast<u64>(pos)), cast<u64>(10 - pos))
+}
+
+§ --- Banner ---
+
+function print_banner(): void {
+    print_str(cast<ptr<u8>>("Verslang Bootstrap Compiler v"))
+    print_u32(VERSION_MAJOR)
+    declare dot: array<u8, 1> = "."
+    print(cast<ptr<u8>>(address_of(dot)), 1)
+    print_u32(VERSION_MINOR)
+    print(cast<ptr<u8>>(address_of(dot)), 1)
+    print_u32(VERSION_PATCH)
+    print_newline()
+    print_str(cast<ptr<u8>>("Self-hosting compiler written in Verslang"))
+    print_newline()
+    print_newline()
+}
+
+§ --- Usage ---
+
+function print_usage(): void {
+    print_str(cast<ptr<u8>>("Usage: verslang-bootstrap [options] <input.vlang>"))
+    print_newline()
+    print_newline()
+    print_str(cast<ptr<u8>>("Options:"))
+    print_newline()
+    print_str(cast<ptr<u8>>("  -o <file>      Output file path"))
+    print_newline()
+    print_str(cast<ptr<u8>>("  -f <format>    Output format: elf64, pe64, flat, obj"))
+    print_newline()
+    print_str(cast<ptr<u8>>("  -v, --verbose  Verbose output"))
+    print_newline()
+    print_str(cast<ptr<u8>>("  -O             Enable optimizations"))
+    print_newline()
+    print_str(cast<ptr<u8>>("  -g             Include debug information"))
+    print_newline()
+    print_str(cast<ptr<u8>>("  --version      Show version"))
+    print_newline()
+    print_str(cast<ptr<u8>>("  --help         Show this help"))
+    print_newline()
+}
+
+§ --- Argument Parsing ---
+
+function parse_args(argc: i32, argv: ptr<ptr<u8>>): CompilerOptions {
+    declare opts: CompilerOptions
+    opts.input_file = cast<ptr<u8>>(0)
+    opts.input_length = 0
+    opts.output_file = cast<ptr<u8>>(0)
+    opts.output_length = 0
+    opts.target = OutputTarget::Executable
+    opts.verbose = false
+    opts.optimize = false
+    opts.debug_info = false
+
+    § Default format based on platform
+    when platform == "linux" {
+        opts.format = OutputFormat::ELF64
+    }
+    when platform == "windows" {
+        opts.format = OutputFormat::PE64
+    }
+
+    declare i: i32 = 1  § Skip program name
+    while (i < argc) {
+        declare arg: ptr<u8> = dereference(cast<ptr<ptr<u8>>>(cast<u64>(argv) + cast<u64>(i) * 8))
+        declare arg_len: u64 = str_len(arg)
+
+        § --help
+        if (str_eq(arg, arg_len, cast<ptr<u8>>("--help"), 6)) {
+            print_usage()
+            sys_exit(0)
+        }
+
+        § --version
+        if (str_eq(arg, arg_len, cast<ptr<u8>>("--version"), 9)) {
+            print_banner()
+            sys_exit(0)
+        }
+
+        § -v / --verbose
+        if (str_eq(arg, arg_len, cast<ptr<u8>>("-v"), 2) || str_eq(arg, arg_len, cast<ptr<u8>>("--verbose"), 9)) {
+            opts.verbose = true
+            i = i + 1
+            continue
+        }
+
+        § -O
+        if (str_eq(arg, arg_len, cast<ptr<u8>>("-O"), 2)) {
+            opts.optimize = true
+            i = i + 1
+            continue
+        }
+
+        § -g
+        if (str_eq(arg, arg_len, cast<ptr<u8>>("-g"), 2)) {
+            opts.debug_info = true
+            i = i + 1
+            continue
+        }
+
+        § -o <output>
+        if (str_eq(arg, arg_len, cast<ptr<u8>>("-o"), 2)) {
+            i = i + 1
+            if (i < argc) {
+                opts.output_file = dereference(cast<ptr<ptr<u8>>>(cast<u64>(argv) + cast<u64>(i) * 8))
+                opts.output_length = str_len(opts.output_file)
+            }
+            i = i + 1
+            continue
+        }
+
+        § -f <format>
+        if (str_eq(arg, arg_len, cast<ptr<u8>>("-f"), 2)) {
+            i = i + 1
+            if (i < argc) {
+                declare fmt: ptr<u8> = dereference(cast<ptr<ptr<u8>>>(cast<u64>(argv) + cast<u64>(i) * 8))
+                declare fmt_len: u64 = str_len(fmt)
+                if (str_eq(fmt, fmt_len, cast<ptr<u8>>("elf64"), 5)) {
+                    opts.format = OutputFormat::ELF64
+                } else if (str_eq(fmt, fmt_len, cast<ptr<u8>>("pe64"), 4)) {
+                    opts.format = OutputFormat::PE64
+                } else if (str_eq(fmt, fmt_len, cast<ptr<u8>>("flat"), 4)) {
+                    opts.format = OutputFormat::FlatBinary
+                } else if (str_eq(fmt, fmt_len, cast<ptr<u8>>("obj"), 3)) {
+                    opts.format = OutputFormat::ObjectFile
+                }
+            }
+            i = i + 1
+            continue
+        }
+
+        § Input file (no dash prefix)
+        if (dereference(arg) != 45) {  § not '-'
+            opts.input_file = arg
+            opts.input_length = arg_len
+        }
+
+        i = i + 1
+    }
+
+    return opts
+}
+
+§ --- Compilation Pipeline ---
+
+function compile(opts: CompilerOptions): i32 {
+    § Step 1: Read source file
+    if (opts.verbose) {
+        print_str(cast<ptr<u8>>("Reading: "))
+        print(opts.input_file, opts.input_length)
+        print_newline()
+    }
+
+    declare source: ptr<u8> = read_file(opts.input_file)
+    if (source == cast<ptr<u8>>(0)) {
+        print_error(cast<ptr<u8>>("Error: Cannot read input file: "), 31)
+        print_error(opts.input_file, opts.input_length)
+        print_error(cast<ptr<u8>>("\n"), 1)
+        return 1
+    }
+
+    declare source_len: u64 = str_len(source)
+    if (opts.verbose) {
+        print_str(cast<ptr<u8>>("Source size: "))
+        print_u32(cast<u32>(source_len))
+        print_str(cast<ptr<u8>>(" bytes"))
+        print_newline()
+    }
+
+    § Step 2: Tokenize
+    if (opts.verbose) {
+        print_str(cast<ptr<u8>>("Tokenizing..."))
+        print_newline()
+    }
+
+    constant MAX_TOKENS: u64 = 131072
+    declare alloc_size: u64 = sizeof(Token) * MAX_TOKENS
+
+    when platform == "linux" {
+        declare token_buf: ptr<Token> = cast<ptr<Token>>(sys_mmap(alloc_size))
+    }
+    when platform == "windows" {
+        declare token_buf: ptr<Token> = cast<ptr<Token>>(VirtualAlloc(cast<ptr<u8>>(0), alloc_size, 0x3000, 0x04))
+    }
+
+    declare token_count: u64 = lexer_tokenize_all(source, source_len, token_buf, MAX_TOKENS)
+
+    if (opts.verbose) {
+        print_str(cast<ptr<u8>>("Tokens: "))
+        print_u32(cast<u32>(token_count))
+        print_newline()
+    }
+
+    § Step 3: Parse
+    if (opts.verbose) {
+        print_str(cast<ptr<u8>>("Parsing..."))
+        print_newline()
+    }
+
+    declare parser: Parser = parser_init(source, source_len, token_buf, token_count)
+    declare program_node: u32 = parse_program(address_of(parser))
+
+    if (parser.error_count > 0) {
+        print_error(cast<ptr<u8>>("Parse errors: "), 14)
+        declare err_buf: array<u8, 10>
+        print_u32(parser.error_count)
+        print_error(cast<ptr<u8>>("\n"), 1)
+        print_error(cast<ptr<u8>>("  at line "), 10)
+        print_u32(parser.error_line)
+        print_error(cast<ptr<u8>>(", column "), 9)
+        print_u32(parser.error_column)
+        print_error(cast<ptr<u8>>("\n"), 1)
+        return 1
+    }
+
+    if (opts.verbose) {
+        print_str(cast<ptr<u8>>("AST nodes: "))
+        print_u32(parser.pool.count)
+        print_newline()
+    }
+
+    § Step 4: Generate code
+    if (opts.verbose) {
+        print_str(cast<ptr<u8>>("Generating "))
+        switch (cast<i32>(opts.format)) {
+            case 0:
+                print_str(cast<ptr<u8>>("ELF64"))
+                break
+            case 1:
+                print_str(cast<ptr<u8>>("PE64"))
+                break
+            case 2:
+                print_str(cast<ptr<u8>>("flat binary"))
+                break
+            case 3:
+                print_str(cast<ptr<u8>>("object"))
+                break
+        }
+        print_str(cast<ptr<u8>>("..."))
+        print_newline()
+    }
+
+    declare cg: CodeGen = codegen_init(opts.format)
+    cg.source = source
+    cg.pool = address_of(parser.pool)
+
+    § Generate code for the parsed program
+    § (The generate_program function traverses the AST and emits machine code)
+    § This is where the full codegen traversal would go, calling into
+    § codegen.vlang's instruction emission functions for each AST node
+
+    § Step 5: Write output
+    declare output_path: ptr<u8> = opts.output_file
+    if (output_path == cast<ptr<u8>>(0)) {
+        § Default output name
+        when platform == "linux" {
+            declare default_out: array<u8, 6> = "a.out"
+            output_path = cast<ptr<u8>>(address_of(default_out))
+        }
+        when platform == "windows" {
+            declare default_out: array<u8, 6> = "a.exe"
+            output_path = cast<ptr<u8>>(address_of(default_out))
+        }
+    }
+
+    declare success: bool = write_file(
+        output_path,
+        cg.buf.code,
+        cg.buf.code_size
+    )
+
+    if (!success) {
+        print_error(cast<ptr<u8>>("Error: Cannot write output file\n"), 33)
+        return 1
+    }
+
+    if (opts.verbose) {
+        print_str(cast<ptr<u8>>("Output: "))
+        print_str(output_path)
+        print_str(cast<ptr<u8>>(" ("))
+        print_u32(cast<u32>(cg.buf.code_size))
+        print_str(cast<ptr<u8>>(" bytes)"))
+        print_newline()
+    }
+
+    § Step 6: Summary
+    print_str(cast<ptr<u8>>("Compilation successful"))
+    print_newline()
+    print_str(cast<ptr<u8>>("  Tokens:    "))
+    print_u32(cast<u32>(token_count))
+    print_newline()
+    print_str(cast<ptr<u8>>("  AST nodes: "))
+    print_u32(parser.pool.count)
+    print_newline()
+    print_str(cast<ptr<u8>>("  Symbols:   "))
+    print_u32(cast<u32>(cg.symbol_count))
+    print_newline()
+    print_str(cast<ptr<u8>>("  Code size: "))
+    print_u32(cast<u32>(cg.buf.code_size))
+    print_str(cast<ptr<u8>>(" bytes"))
+    print_newline()
+    print_str(cast<ptr<u8>>("  Data size: "))
+    print_u32(cast<u32>(cg.buf.data_size))
+    print_str(cast<ptr<u8>>(" bytes"))
+    print_newline()
+
+    return 0
+}
+
+§ --- Entry Point ---
+
+function _start(): void {
+    print_banner()
+
+    § In a real bootstrap, argc/argv would come from the OS
+    § For Linux: they're on the stack at _start
+    § For Windows: use GetCommandLineA + parse
+
+    § For now, this demonstrates the compilation pipeline structure
+    § The actual arg parsing would use assembly to access the stack:
+
+    when platform == "linux" {
+        declare argc: i32
+        declare argv: ptr<ptr<u8>>
+        assembly {
+            § On Linux, at _start: [rsp] = argc, [rsp+8] = argv[0], ...
+            "mov eax, [rsp]"
+            "mov %[argc], eax"
+            "lea rax, [rsp + 8]"
+            "mov %[argv], rax"
+        }
+
+        if (argc < 2) {
+            print_usage()
+            sys_exit(1)
+        }
+
+        declare opts: CompilerOptions = parse_args(argc, argv)
+        if (opts.input_file == cast<ptr<u8>>(0)) {
+            print_error(cast<ptr<u8>>("Error: No input file specified\n"), 32)
+            print_usage()
+            sys_exit(1)
+        }
+
+        declare result: i32 = compile(opts)
+        sys_exit(result)
+    }
+
+    when platform == "windows" {
+        § Windows entry point uses command line parsing
+        external function GetCommandLineA(): ptr<u8>
+        declare cmdline: ptr<u8> = GetCommandLineA()
+        § For simplicity, just show usage
+        print_usage()
+        ExitProcess(0)
+    }
+}

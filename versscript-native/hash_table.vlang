@@ -1,0 +1,548 @@
+§ ============================================================================
+§ Versscript Native Module: High-Performance Hash Table
+§ Written in Verslang for use by Versscript's HashMap/Set builtins
+§ Uses open addressing with Robin Hood hashing for minimal probe variance
+§ Compile: verslang hash_table.vlang -o hash_table.o -f obj
+§ ============================================================================
+
+§ --- Constants ---
+
+constant INITIAL_CAPACITY: u64 = 16
+constant LOAD_FACTOR_NUM: u64 = 7
+constant LOAD_FACTOR_DEN: u64 = 10
+constant EMPTY_HASH: u64 = 0
+constant TOMBSTONE_HASH: u64 = 1
+constant HASH_OFFSET: u64 = 14695981039346656037
+constant HASH_PRIME: u64 = 1099511628211
+
+§ --- Structures ---
+
+structure HashEntry {
+    key: ptr<u8>,
+    key_length: u64,
+    value: ptr<u8>,
+    value_size: u64,
+    hash: u64,
+    probe_distance: u32,
+    occupied: bool
+}
+
+structure HashTable {
+    entries: ptr<HashEntry>,
+    capacity: u64,
+    count: u64,
+    tombstone_count: u64,
+    max_probe: u32
+}
+
+structure HashLookupResult {
+    found: bool,
+    index: u64,
+    value: ptr<u8>,
+    value_size: u64
+}
+
+structure HashIterator {
+    table: ptr<HashTable>,
+    current_index: u64
+}
+
+structure HashStats {
+    count: u64,
+    capacity: u64,
+    load_factor_percent: u32,
+    max_probe_distance: u32,
+    average_probe_distance: u32,
+    tombstone_count: u64,
+    memory_bytes: u64
+}
+
+§ --- OS Memory Allocation ---
+
+when platform == "linux" {
+    function os_alloc(size: u64): ptr<u8> {
+        declare result: u64
+        assembly {
+            § mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
+            "mov rax, 9"
+            "xor rdi, rdi"
+            "mov rsi, %[size]"
+            "mov rdx, 3"
+            "mov r10, 34"
+            "mov r8, -1"
+            "xor r9, r9"
+            "syscall"
+            "mov %[result], rax"
+        }
+        return cast<ptr<u8>>(result)
+    }
+
+    function os_free(addr: ptr<u8>, size: u64): void {
+        assembly {
+            § munmap(addr, size)
+            "mov rax, 11"
+            "mov rdi, %[addr]"
+            "mov rsi, %[size]"
+            "syscall"
+        }
+    }
+}
+
+when platform == "windows" {
+    external function VirtualAlloc(addr: ptr<u8>, size: u64, type: u32, protect: u32): ptr<u8>
+    external function VirtualFree(addr: ptr<u8>, size: u64, type: u32): bool
+
+    function os_alloc(size: u64): ptr<u8> {
+        return VirtualAlloc(cast<ptr<u8>>(0), size, 0x3000, 0x04)
+    }
+
+    function os_free(addr: ptr<u8>, size: u64): void {
+        VirtualFree(addr, 0, 0x8000)
+    }
+}
+
+§ --- FNV-1a Hash Function ---
+
+function fnv1a_hash(key: ptr<u8>, length: u64): u64 {
+    declare hash: u64 = HASH_OFFSET
+    declare i: u64 = 0
+
+    § Process 8 bytes at a time for performance
+    while (i + 8 <= length) {
+        declare chunk: u64 = dereference(cast<ptr<u64>>(cast<u64>(key) + i))
+        hash = hash ^ chunk
+        hash = hash * HASH_PRIME
+        i = i + 8
+    }
+
+    § Process remaining bytes
+    while (i < length) {
+        declare byte: u8 = dereference(cast<ptr<u8>>(cast<u64>(key) + i))
+        hash = hash ^ cast<u64>(byte)
+        hash = hash * HASH_PRIME
+        i = i + 1
+    }
+
+    § Ensure hash is never 0 or 1 (reserved for empty/tombstone)
+    if (hash <= 1) {
+        hash = hash + 2
+    }
+    return hash
+}
+
+§ --- Memory Utilities ---
+
+function mem_zero(dest: ptr<u8>, size: u64): void {
+    declare p: u64 = cast<u64>(dest)
+    § Zero 8 bytes at a time
+    declare end8: u64 = p + (size & ~7)
+    while (p < end8) {
+        dereference(cast<ptr<u64>>(p)) = 0
+        p = p + 8
+    }
+    § Zero remaining bytes
+    declare end: u64 = cast<u64>(dest) + size
+    while (p < end) {
+        dereference(cast<ptr<u8>>(p)) = 0
+        p = p + 1
+    }
+}
+
+function mem_copy_bytes(dest: ptr<u8>, src: ptr<u8>, size: u64): void {
+    declare d: u64 = cast<u64>(dest)
+    declare s: u64 = cast<u64>(src)
+    declare i: u64 = 0
+    while (i + 8 <= size) {
+        dereference(cast<ptr<u64>>(d + i)) = dereference(cast<ptr<u64>>(s + i))
+        i = i + 8
+    }
+    while (i < size) {
+        dereference(cast<ptr<u8>>(d + i)) = dereference(cast<ptr<u8>>(s + i))
+        i = i + 1
+    }
+}
+
+function keys_equal(a: ptr<u8>, a_len: u64, b: ptr<u8>, b_len: u64): bool {
+    if (a_len != b_len) { return false }
+    declare i: u64 = 0
+    § Compare 8 bytes at a time
+    while (i + 8 <= a_len) {
+        declare va: u64 = dereference(cast<ptr<u64>>(cast<u64>(a) + i))
+        declare vb: u64 = dereference(cast<ptr<u64>>(cast<u64>(b) + i))
+        if (va != vb) { return false }
+        i = i + 8
+    }
+    § Compare remaining
+    while (i < a_len) {
+        if (dereference(cast<ptr<u8>>(cast<u64>(a) + i)) != dereference(cast<ptr<u8>>(cast<u64>(b) + i))) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+§ --- Hash Table Core ---
+
+function hashtable_create(): HashTable {
+    declare table: HashTable
+    declare entry_size: u64 = sizeof(HashEntry)
+    declare alloc_size: u64 = entry_size * INITIAL_CAPACITY
+    table.entries = cast<ptr<HashEntry>>(os_alloc(alloc_size))
+    mem_zero(cast<ptr<u8>>(table.entries), alloc_size)
+    table.capacity = INITIAL_CAPACITY
+    table.count = 0
+    table.tombstone_count = 0
+    table.max_probe = 0
+    return table
+}
+
+function hashtable_destroy(table: ptr<HashTable>): void {
+    declare t: HashTable = dereference(table)
+    declare alloc_size: u64 = sizeof(HashEntry) * t.capacity
+    os_free(cast<ptr<u8>>(t.entries), alloc_size)
+    dereference(table).entries = cast<ptr<HashEntry>>(0)
+    dereference(table).capacity = 0
+    dereference(table).count = 0
+}
+
+§ --- Resize / Rehash ---
+
+function hashtable_resize(table: ptr<HashTable>, new_capacity: u64): void {
+    declare old_entries: ptr<HashEntry> = dereference(table).entries
+    declare old_capacity: u64 = dereference(table).capacity
+    declare entry_size: u64 = sizeof(HashEntry)
+
+    § Allocate new entries
+    declare new_alloc: u64 = entry_size * new_capacity
+    declare new_entries: ptr<HashEntry> = cast<ptr<HashEntry>>(os_alloc(new_alloc))
+    mem_zero(cast<ptr<u8>>(new_entries), new_alloc)
+
+    § Rehash all existing entries
+    declare new_count: u64 = 0
+    declare new_max_probe: u32 = 0
+
+    for (declare i: u64 = 0; i < old_capacity; i = i + 1) {
+        declare entry: ptr<HashEntry> = cast<ptr<HashEntry>>(
+            cast<u64>(old_entries) + i * entry_size
+        )
+        declare e: HashEntry = dereference(entry)
+        if (!e.occupied || e.hash == TOMBSTONE_HASH) {
+            continue
+        }
+
+        § Find new position with Robin Hood insertion
+        declare idx: u64 = e.hash & (new_capacity - 1)
+        declare probe: u32 = 0
+        declare inserting: HashEntry = e
+        inserting.probe_distance = 0
+
+        loop {
+            declare slot: ptr<HashEntry> = cast<ptr<HashEntry>>(
+                cast<u64>(new_entries) + idx * entry_size
+            )
+            declare existing: HashEntry = dereference(slot)
+
+            if (!existing.occupied) {
+                § Empty slot, insert here
+                inserting.probe_distance = probe
+                dereference(slot) = inserting
+                new_count = new_count + 1
+                if (probe > new_max_probe) {
+                    new_max_probe = probe
+                }
+                break
+            }
+
+            § Robin Hood: swap if current entry has traveled farther
+            if (probe > existing.probe_distance) {
+                declare temp: HashEntry = existing
+                inserting.probe_distance = probe
+                dereference(slot) = inserting
+                inserting = temp
+                probe = temp.probe_distance
+            }
+
+            probe = probe + 1
+            idx = (idx + 1) & (new_capacity - 1)
+        }
+    }
+
+    § Free old entries
+    os_free(cast<ptr<u8>>(old_entries), entry_size * old_capacity)
+
+    § Update table
+    dereference(table).entries = new_entries
+    dereference(table).capacity = new_capacity
+    dereference(table).count = new_count
+    dereference(table).tombstone_count = 0
+    dereference(table).max_probe = new_max_probe
+}
+
+§ --- Insert ---
+
+function hashtable_set(table: ptr<HashTable>, key: ptr<u8>, key_len: u64, value: ptr<u8>, value_size: u64): bool {
+    declare t: HashTable = dereference(table)
+
+    § Check load factor and resize if needed
+    declare threshold: u64 = (t.capacity * LOAD_FACTOR_NUM) / LOAD_FACTOR_DEN
+    if (t.count + t.tombstone_count >= threshold) {
+        declare new_cap: u64 = t.capacity * 2
+        hashtable_resize(table, new_cap)
+        t = dereference(table)
+    }
+
+    declare hash: u64 = fnv1a_hash(key, key_len)
+    declare idx: u64 = hash & (t.capacity - 1)
+    declare probe: u32 = 0
+    declare entry_size: u64 = sizeof(HashEntry)
+
+    § Build entry to insert
+    declare new_entry: HashEntry
+    new_entry.key = key
+    new_entry.key_length = key_len
+    new_entry.value = value
+    new_entry.value_size = value_size
+    new_entry.hash = hash
+    new_entry.occupied = true
+
+    loop {
+        declare slot: ptr<HashEntry> = cast<ptr<HashEntry>>(
+            cast<u64>(t.entries) + idx * entry_size
+        )
+        declare existing: HashEntry = dereference(slot)
+
+        § Empty slot or tombstone: insert
+        if (!existing.occupied || existing.hash == TOMBSTONE_HASH) {
+            new_entry.probe_distance = probe
+            dereference(slot) = new_entry
+            dereference(table).count = dereference(table).count + 1
+            if (existing.hash == TOMBSTONE_HASH) {
+                dereference(table).tombstone_count = dereference(table).tombstone_count - 1
+            }
+            if (probe > dereference(table).max_probe) {
+                dereference(table).max_probe = probe
+            }
+            return true  § New entry
+        }
+
+        § Key already exists: update value
+        if (existing.hash == hash && keys_equal(existing.key, existing.key_length, key, key_len)) {
+            dereference(slot).value = value
+            dereference(slot).value_size = value_size
+            return false  § Updated existing
+        }
+
+        § Robin Hood: swap if we've probed farther
+        if (probe > existing.probe_distance) {
+            new_entry.probe_distance = probe
+            declare temp: HashEntry = existing
+            dereference(slot) = new_entry
+            new_entry = temp
+            probe = temp.probe_distance
+        }
+
+        probe = probe + 1
+        idx = (idx + 1) & (t.capacity - 1)
+    }
+
+    § Should never reach here
+    return false
+}
+
+§ --- Lookup ---
+
+function hashtable_get(table: ptr<HashTable>, key: ptr<u8>, key_len: u64): HashLookupResult {
+    declare result: HashLookupResult
+    result.found = false
+    result.value = cast<ptr<u8>>(0)
+    result.value_size = 0
+
+    declare t: HashTable = dereference(table)
+    declare hash: u64 = fnv1a_hash(key, key_len)
+    declare idx: u64 = hash & (t.capacity - 1)
+    declare probe: u32 = 0
+    declare entry_size: u64 = sizeof(HashEntry)
+
+    loop {
+        declare slot: ptr<HashEntry> = cast<ptr<HashEntry>>(
+            cast<u64>(t.entries) + idx * entry_size
+        )
+        declare entry: HashEntry = dereference(slot)
+
+        § Empty slot: key not found
+        if (!entry.occupied && entry.hash != TOMBSTONE_HASH) {
+            break
+        }
+
+        § Skip tombstones
+        if (entry.hash == TOMBSTONE_HASH) {
+            probe = probe + 1
+            idx = (idx + 1) & (t.capacity - 1)
+            continue
+        }
+
+        § Early termination: no entry could have probed this far
+        if (probe > entry.probe_distance) {
+            break
+        }
+
+        § Check for match
+        if (entry.hash == hash && keys_equal(entry.key, entry.key_length, key, key_len)) {
+            result.found = true
+            result.index = idx
+            result.value = entry.value
+            result.value_size = entry.value_size
+            return result
+        }
+
+        probe = probe + 1
+        idx = (idx + 1) & (t.capacity - 1)
+    }
+
+    return result
+}
+
+§ --- Delete ---
+
+function hashtable_delete(table: ptr<HashTable>, key: ptr<u8>, key_len: u64): bool {
+    declare t: HashTable = dereference(table)
+    declare hash: u64 = fnv1a_hash(key, key_len)
+    declare idx: u64 = hash & (t.capacity - 1)
+    declare probe: u32 = 0
+    declare entry_size: u64 = sizeof(HashEntry)
+
+    loop {
+        declare slot: ptr<HashEntry> = cast<ptr<HashEntry>>(
+            cast<u64>(t.entries) + idx * entry_size
+        )
+        declare entry: HashEntry = dereference(slot)
+
+        if (!entry.occupied && entry.hash != TOMBSTONE_HASH) {
+            return false  § Not found
+        }
+
+        if (entry.hash == TOMBSTONE_HASH) {
+            probe = probe + 1
+            idx = (idx + 1) & (t.capacity - 1)
+            continue
+        }
+
+        if (probe > entry.probe_distance) {
+            return false  § Not found
+        }
+
+        if (entry.hash == hash && keys_equal(entry.key, entry.key_length, key, key_len)) {
+            § Mark as tombstone
+            dereference(slot).occupied = false
+            dereference(slot).hash = TOMBSTONE_HASH
+            dereference(slot).key = cast<ptr<u8>>(0)
+            dereference(slot).value = cast<ptr<u8>>(0)
+            dereference(table).count = dereference(table).count - 1
+            dereference(table).tombstone_count = dereference(table).tombstone_count + 1
+
+            § If too many tombstones, compact
+            declare total: u64 = dereference(table).count + dereference(table).tombstone_count
+            if (dereference(table).tombstone_count * 4 > total && t.capacity > INITIAL_CAPACITY) {
+                hashtable_resize(table, t.capacity)
+            }
+
+            return true
+        }
+
+        probe = probe + 1
+        idx = (idx + 1) & (t.capacity - 1)
+    }
+
+    return false
+}
+
+§ --- Utility Functions ---
+
+function hashtable_contains(table: ptr<HashTable>, key: ptr<u8>, key_len: u64): bool {
+    declare result: HashLookupResult = hashtable_get(table, key, key_len)
+    return result.found
+}
+
+function hashtable_count(table: ptr<HashTable>): u64 {
+    return dereference(table).count
+}
+
+function hashtable_clear(table: ptr<HashTable>): void {
+    declare t: HashTable = dereference(table)
+    declare alloc_size: u64 = sizeof(HashEntry) * t.capacity
+    mem_zero(cast<ptr<u8>>(t.entries), alloc_size)
+    dereference(table).count = 0
+    dereference(table).tombstone_count = 0
+    dereference(table).max_probe = 0
+}
+
+§ --- Iterator ---
+
+function hashtable_iterator(table: ptr<HashTable>): HashIterator {
+    declare iter: HashIterator
+    iter.table = table
+    iter.current_index = 0
+    return iter
+}
+
+function hashtable_next(iter: ptr<HashIterator>): HashEntry {
+    declare it: HashIterator = dereference(iter)
+    declare t: HashTable = dereference(it.table)
+    declare entry_size: u64 = sizeof(HashEntry)
+    declare empty: HashEntry
+    empty.occupied = false
+
+    while (it.current_index < t.capacity) {
+        declare slot: ptr<HashEntry> = cast<ptr<HashEntry>>(
+            cast<u64>(t.entries) + it.current_index * entry_size
+        )
+        declare entry: HashEntry = dereference(slot)
+        it.current_index = it.current_index + 1
+        dereference(iter).current_index = it.current_index
+
+        if (entry.occupied && entry.hash != TOMBSTONE_HASH) {
+            return entry
+        }
+    }
+
+    return empty
+}
+
+§ --- Statistics ---
+
+function hashtable_stats(table: ptr<HashTable>): HashStats {
+    declare stats: HashStats
+    declare t: HashTable = dereference(table)
+    stats.count = t.count
+    stats.capacity = t.capacity
+    stats.tombstone_count = t.tombstone_count
+    stats.max_probe_distance = t.max_probe
+    stats.memory_bytes = sizeof(HashEntry) * t.capacity + sizeof(HashTable)
+
+    if (t.capacity > 0) {
+        stats.load_factor_percent = cast<u32>((t.count * 100) / t.capacity)
+    } else {
+        stats.load_factor_percent = 0
+    }
+
+    § Calculate average probe distance
+    declare total_probes: u64 = 0
+    declare entry_size: u64 = sizeof(HashEntry)
+    for (declare i: u64 = 0; i < t.capacity; i = i + 1) {
+        declare slot: ptr<HashEntry> = cast<ptr<HashEntry>>(
+            cast<u64>(t.entries) + i * entry_size
+        )
+        declare entry: HashEntry = dereference(slot)
+        if (entry.occupied && entry.hash != TOMBSTONE_HASH) {
+            total_probes = total_probes + cast<u64>(entry.probe_distance)
+        }
+    }
+    if (t.count > 0) {
+        stats.average_probe_distance = cast<u32>(total_probes / t.count)
+    } else {
+        stats.average_probe_distance = 0
+    }
+
+    return stats
+}

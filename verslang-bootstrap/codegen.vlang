@@ -1,0 +1,749 @@
+§ ============================================================================
+§ Verslang Bootstrap Compiler: x86-64 Code Generator
+§ Emits x86-64 machine code from the AST produced by the parser
+§ Written in Verslang for self-hosting bootstrap
+§ Compile: verslang codegen.vlang -o codegen.o -f obj
+§ ============================================================================
+
+§ --- Output Format ---
+
+enumeration OutputFormat {
+    ELF64 = 0,
+    PE64 = 1,
+    FlatBinary = 2,
+    ObjectFile = 3
+}
+
+§ --- Register Encoding ---
+
+enumeration Reg64 {
+    RAX = 0,
+    RCX = 1,
+    RDX = 2,
+    RBX = 3,
+    RSP = 4,
+    RBP = 5,
+    RSI = 6,
+    RDI = 7,
+    R8 = 8,
+    R9 = 9,
+    R10 = 10,
+    R11 = 11,
+    R12 = 12,
+    R13 = 13,
+    R14 = 14,
+    R15 = 15
+}
+
+§ --- Code Buffer ---
+
+constant CODE_BUFFER_SIZE: u64 = 1048576  § 1 MB
+constant DATA_BUFFER_SIZE: u64 = 1048576  § 1 MB
+
+structure CodeBuffer {
+    code: ptr<u8>,
+    code_size: u64,
+    code_capacity: u64,
+    data: ptr<u8>,
+    data_size: u64,
+    data_capacity: u64
+}
+
+§ --- Relocation Entry ---
+
+enumeration RelocKind {
+    Rel32 = 0,    § PC-relative 32-bit
+    Abs64 = 1     § Absolute 64-bit
+}
+
+structure Relocation {
+    offset: u64,       § Offset in code buffer
+    target_symbol: u64, § Symbol index
+    kind: RelocKind,
+    addend: i64
+}
+
+constant MAX_RELOCATIONS: u64 = 4096
+
+§ --- Symbol Table ---
+
+structure Symbol {
+    name_start: u64,
+    name_length: u64,
+    offset: u64,
+    section: u8,   § 0 = code, 1 = data
+    is_defined: bool,
+    is_external: bool,
+    is_global: bool
+}
+
+constant MAX_SYMBOLS: u64 = 4096
+
+§ --- Local Variable Tracking ---
+
+structure LocalVar {
+    name_start: u64,
+    name_length: u64,
+    stack_offset: i32,
+    size: u32,
+    type_node: u32
+}
+
+constant MAX_LOCALS: u64 = 256
+
+§ --- Code Generator State ---
+
+structure CodeGen {
+    buf: CodeBuffer,
+    source: ptr<u8>,
+    pool: ptr<NodePool>,
+
+    § Symbol table
+    symbols: ptr<Symbol>,
+    symbol_count: u64,
+
+    § Relocations
+    relocs: ptr<Relocation>,
+    reloc_count: u64,
+
+    § Current function context
+    locals: ptr<LocalVar>,
+    local_count: u64,
+    stack_size: i32,
+    current_function: u32,
+
+    § Output format
+    format: OutputFormat,
+
+    § Label counter
+    label_counter: u32,
+
+    § Error tracking
+    error_count: u32
+}
+
+§ --- OS Memory ---
+
+when platform == "linux" {
+    function cg_alloc(size: u64): ptr<u8> {
+        declare result: u64
+        assembly {
+            "mov rax, 9"
+            "xor rdi, rdi"
+            "mov rsi, %[size]"
+            "mov rdx, 3"
+            "mov r10, 34"
+            "mov r8, -1"
+            "xor r9, r9"
+            "syscall"
+            "mov %[result], rax"
+        }
+        return cast<ptr<u8>>(result)
+    }
+}
+
+when platform == "windows" {
+    external function VirtualAlloc(addr: ptr<u8>, size: u64, type: u32, protect: u32): ptr<u8>
+
+    function cg_alloc(size: u64): ptr<u8> {
+        return VirtualAlloc(cast<ptr<u8>>(0), size, 0x3000, 0x04)
+    }
+}
+
+§ --- Code Buffer Operations ---
+
+function codegen_init(format: OutputFormat): CodeGen {
+    declare cg: CodeGen
+    cg.buf.code = cg_alloc(CODE_BUFFER_SIZE)
+    cg.buf.code_size = 0
+    cg.buf.code_capacity = CODE_BUFFER_SIZE
+    cg.buf.data = cg_alloc(DATA_BUFFER_SIZE)
+    cg.buf.data_size = 0
+    cg.buf.data_capacity = DATA_BUFFER_SIZE
+    cg.symbols = cast<ptr<Symbol>>(cg_alloc(sizeof(Symbol) * MAX_SYMBOLS))
+    cg.symbol_count = 0
+    cg.relocs = cast<ptr<Relocation>>(cg_alloc(sizeof(Relocation) * MAX_RELOCATIONS))
+    cg.reloc_count = 0
+    cg.locals = cast<ptr<LocalVar>>(cg_alloc(sizeof(LocalVar) * MAX_LOCALS))
+    cg.local_count = 0
+    cg.stack_size = 0
+    cg.format = format
+    cg.label_counter = 0
+    cg.error_count = 0
+    return cg
+}
+
+function emit_byte(cg: ptr<CodeGen>, b: u8): void {
+    declare size: u64 = dereference(cg).buf.code_size
+    if (size < dereference(cg).buf.code_capacity) {
+        dereference(cast<ptr<u8>>(cast<u64>(dereference(cg).buf.code) + size)) = b
+        dereference(cg).buf.code_size = size + 1
+    }
+}
+
+function emit_u16(cg: ptr<CodeGen>, val: u16): void {
+    emit_byte(cg, cast<u8>(val & 0xFF))
+    emit_byte(cg, cast<u8>((val >> 8) & 0xFF))
+}
+
+function emit_u32(cg: ptr<CodeGen>, val: u32): void {
+    emit_byte(cg, cast<u8>(val & 0xFF))
+    emit_byte(cg, cast<u8>((val >> 8) & 0xFF))
+    emit_byte(cg, cast<u8>((val >> 16) & 0xFF))
+    emit_byte(cg, cast<u8>((val >> 24) & 0xFF))
+}
+
+function emit_u64(cg: ptr<CodeGen>, val: u64): void {
+    emit_u32(cg, cast<u32>(val & 0xFFFFFFFF))
+    emit_u32(cg, cast<u32>((val >> 32) & 0xFFFFFFFF))
+}
+
+function emit_i32(cg: ptr<CodeGen>, val: i32): void {
+    emit_u32(cg, bitcast<u32>(val))
+}
+
+function emit_data_byte(cg: ptr<CodeGen>, b: u8): void {
+    declare size: u64 = dereference(cg).buf.data_size
+    if (size < dereference(cg).buf.data_capacity) {
+        dereference(cast<ptr<u8>>(cast<u64>(dereference(cg).buf.data) + size)) = b
+        dereference(cg).buf.data_size = size + 1
+    }
+}
+
+function current_code_offset(cg: ptr<CodeGen>): u64 {
+    return dereference(cg).buf.code_size
+}
+
+function next_label(cg: ptr<CodeGen>): u32 {
+    declare lbl: u32 = dereference(cg).label_counter
+    dereference(cg).label_counter = lbl + 1
+    return lbl
+}
+
+§ --- x86-64 Instruction Encoding ---
+
+§ REX prefix
+function emit_rex(cg: ptr<CodeGen>, w: bool, r: u8, x: u8, b: u8): void {
+    declare prefix: u8 = 0x40
+    if (w) { prefix = prefix | 0x08 }
+    if (r > 7) { prefix = prefix | 0x04 }
+    if (x > 7) { prefix = prefix | 0x02 }
+    if (b > 7) { prefix = prefix | 0x01 }
+    emit_byte(cg, prefix)
+}
+
+§ ModR/M byte
+function emit_modrm(cg: ptr<CodeGen>, mod_bits: u8, reg: u8, rm: u8): void {
+    declare byte: u8 = ((mod_bits & 3) << 6) | ((reg & 7) << 3) | (rm & 7)
+    emit_byte(cg, byte)
+}
+
+§ --- Common Instruction Patterns ---
+
+§ mov reg64, imm64
+function emit_mov_reg_imm64(cg: ptr<CodeGen>, reg: Reg64, imm: u64): void {
+    declare r: u8 = cast<u8>(reg)
+    emit_rex(cg, true, 0, 0, r)
+    emit_byte(cg, 0xB8 + (r & 7))
+    emit_u64(cg, imm)
+}
+
+§ mov reg64, imm32 (sign-extended)
+function emit_mov_reg_imm32(cg: ptr<CodeGen>, reg: Reg64, imm: i32): void {
+    declare r: u8 = cast<u8>(reg)
+    emit_rex(cg, true, 0, 0, r)
+    emit_byte(cg, 0xC7)
+    emit_modrm(cg, 3, 0, r)
+    emit_i32(cg, imm)
+}
+
+§ mov reg64, reg64
+function emit_mov_reg_reg(cg: ptr<CodeGen>, dst: Reg64, src: Reg64): void {
+    declare d: u8 = cast<u8>(dst)
+    declare s: u8 = cast<u8>(src)
+    emit_rex(cg, true, s, 0, d)
+    emit_byte(cg, 0x89)
+    emit_modrm(cg, 3, s, d)
+}
+
+§ mov [rbp + offset], reg64
+function emit_mov_mem_rbp_reg(cg: ptr<CodeGen>, offset: i32, src: Reg64): void {
+    declare s: u8 = cast<u8>(src)
+    emit_rex(cg, true, s, 0, 5)
+    emit_byte(cg, 0x89)
+    if (offset >= -128 && offset <= 127) {
+        emit_modrm(cg, 1, s, 5)
+        emit_byte(cg, cast<u8>(bitcast<u32>(offset) & 0xFF))
+    } else {
+        emit_modrm(cg, 2, s, 5)
+        emit_i32(cg, offset)
+    }
+}
+
+§ mov reg64, [rbp + offset]
+function emit_mov_reg_mem_rbp(cg: ptr<CodeGen>, dst: Reg64, offset: i32): void {
+    declare d: u8 = cast<u8>(dst)
+    emit_rex(cg, true, d, 0, 5)
+    emit_byte(cg, 0x8B)
+    if (offset >= -128 && offset <= 127) {
+        emit_modrm(cg, 1, d, 5)
+        emit_byte(cg, cast<u8>(bitcast<u32>(offset) & 0xFF))
+    } else {
+        emit_modrm(cg, 2, d, 5)
+        emit_i32(cg, offset)
+    }
+}
+
+§ add reg64, reg64
+function emit_add_reg_reg(cg: ptr<CodeGen>, dst: Reg64, src: Reg64): void {
+    declare d: u8 = cast<u8>(dst)
+    declare s: u8 = cast<u8>(src)
+    emit_rex(cg, true, s, 0, d)
+    emit_byte(cg, 0x01)
+    emit_modrm(cg, 3, s, d)
+}
+
+§ sub reg64, reg64
+function emit_sub_reg_reg(cg: ptr<CodeGen>, dst: Reg64, src: Reg64): void {
+    declare d: u8 = cast<u8>(dst)
+    declare s: u8 = cast<u8>(src)
+    emit_rex(cg, true, s, 0, d)
+    emit_byte(cg, 0x29)
+    emit_modrm(cg, 3, s, d)
+}
+
+§ imul reg64, reg64
+function emit_imul_reg_reg(cg: ptr<CodeGen>, dst: Reg64, src: Reg64): void {
+    declare d: u8 = cast<u8>(dst)
+    declare s: u8 = cast<u8>(src)
+    emit_rex(cg, true, d, 0, s)
+    emit_byte(cg, 0x0F)
+    emit_byte(cg, 0xAF)
+    emit_modrm(cg, 3, d, s)
+}
+
+§ cqo (sign-extend RAX into RDX:RAX)
+function emit_cqo(cg: ptr<CodeGen>): void {
+    emit_rex(cg, true, 0, 0, 0)
+    emit_byte(cg, 0x99)
+}
+
+§ idiv reg64
+function emit_idiv_reg(cg: ptr<CodeGen>, divisor: Reg64): void {
+    declare d: u8 = cast<u8>(divisor)
+    emit_rex(cg, true, 0, 0, d)
+    emit_byte(cg, 0xF7)
+    emit_modrm(cg, 3, 7, d)
+}
+
+§ push reg64
+function emit_push(cg: ptr<CodeGen>, reg: Reg64): void {
+    declare r: u8 = cast<u8>(reg)
+    if (r >= 8) {
+        emit_byte(cg, 0x41)
+    }
+    emit_byte(cg, 0x50 + (r & 7))
+}
+
+§ pop reg64
+function emit_pop(cg: ptr<CodeGen>, reg: Reg64): void {
+    declare r: u8 = cast<u8>(reg)
+    if (r >= 8) {
+        emit_byte(cg, 0x41)
+    }
+    emit_byte(cg, 0x58 + (r & 7))
+}
+
+§ sub rsp, imm32
+function emit_sub_rsp_imm(cg: ptr<CodeGen>, val: i32): void {
+    emit_rex(cg, true, 0, 0, 0)
+    emit_byte(cg, 0x81)
+    emit_modrm(cg, 3, 5, 4)  § /5 for sub, rm=RSP
+    emit_i32(cg, val)
+}
+
+§ add rsp, imm32
+function emit_add_rsp_imm(cg: ptr<CodeGen>, val: i32): void {
+    emit_rex(cg, true, 0, 0, 0)
+    emit_byte(cg, 0x81)
+    emit_modrm(cg, 3, 0, 4)  § /0 for add, rm=RSP
+    emit_i32(cg, val)
+}
+
+§ cmp reg64, reg64
+function emit_cmp_reg_reg(cg: ptr<CodeGen>, a: Reg64, b: Reg64): void {
+    declare ra: u8 = cast<u8>(a)
+    declare rb: u8 = cast<u8>(b)
+    emit_rex(cg, true, rb, 0, ra)
+    emit_byte(cg, 0x39)
+    emit_modrm(cg, 3, rb, ra)
+}
+
+§ test reg64, reg64
+function emit_test_reg_reg(cg: ptr<CodeGen>, a: Reg64, b: Reg64): void {
+    declare ra: u8 = cast<u8>(a)
+    declare rb: u8 = cast<u8>(b)
+    emit_rex(cg, true, rb, 0, ra)
+    emit_byte(cg, 0x85)
+    emit_modrm(cg, 3, rb, ra)
+}
+
+§ Conditional jumps (near, 32-bit displacement)
+function emit_jcc(cg: ptr<CodeGen>, cc: u8, target_offset: i32): void {
+    emit_byte(cg, 0x0F)
+    emit_byte(cg, 0x80 + cc)
+    emit_i32(cg, target_offset)
+}
+
+§ Unconditional jump (near)
+function emit_jmp(cg: ptr<CodeGen>, target_offset: i32): void {
+    emit_byte(cg, 0xE9)
+    emit_i32(cg, target_offset)
+}
+
+§ call rel32
+function emit_call_rel32(cg: ptr<CodeGen>, displacement: i32): void {
+    emit_byte(cg, 0xE8)
+    emit_i32(cg, displacement)
+}
+
+§ ret
+function emit_ret(cg: ptr<CodeGen>): void {
+    emit_byte(cg, 0xC3)
+}
+
+§ nop
+function emit_nop(cg: ptr<CodeGen>): void {
+    emit_byte(cg, 0x90)
+}
+
+§ xor reg64, reg64 (zero register)
+function emit_xor_reg_reg(cg: ptr<CodeGen>, dst: Reg64, src: Reg64): void {
+    declare d: u8 = cast<u8>(dst)
+    declare s: u8 = cast<u8>(src)
+    emit_rex(cg, true, s, 0, d)
+    emit_byte(cg, 0x31)
+    emit_modrm(cg, 3, s, d)
+}
+
+§ neg reg64
+function emit_neg_reg(cg: ptr<CodeGen>, reg: Reg64): void {
+    declare r: u8 = cast<u8>(reg)
+    emit_rex(cg, true, 0, 0, r)
+    emit_byte(cg, 0xF7)
+    emit_modrm(cg, 3, 3, r)
+}
+
+§ not reg64
+function emit_not_reg(cg: ptr<CodeGen>, reg: Reg64): void {
+    declare r: u8 = cast<u8>(reg)
+    emit_rex(cg, true, 0, 0, r)
+    emit_byte(cg, 0xF7)
+    emit_modrm(cg, 3, 2, r)
+}
+
+§ and/or/xor reg64, reg64
+function emit_and_reg_reg(cg: ptr<CodeGen>, dst: Reg64, src: Reg64): void {
+    declare d: u8 = cast<u8>(dst)
+    declare s: u8 = cast<u8>(src)
+    emit_rex(cg, true, s, 0, d)
+    emit_byte(cg, 0x21)
+    emit_modrm(cg, 3, s, d)
+}
+
+function emit_or_reg_reg(cg: ptr<CodeGen>, dst: Reg64, src: Reg64): void {
+    declare d: u8 = cast<u8>(dst)
+    declare s: u8 = cast<u8>(src)
+    emit_rex(cg, true, s, 0, d)
+    emit_byte(cg, 0x09)
+    emit_modrm(cg, 3, s, d)
+}
+
+§ shl reg64, cl
+function emit_shl_reg_cl(cg: ptr<CodeGen>, reg: Reg64): void {
+    declare r: u8 = cast<u8>(reg)
+    emit_rex(cg, true, 0, 0, r)
+    emit_byte(cg, 0xD3)
+    emit_modrm(cg, 3, 4, r)
+}
+
+§ shr reg64, cl
+function emit_shr_reg_cl(cg: ptr<CodeGen>, reg: Reg64): void {
+    declare r: u8 = cast<u8>(reg)
+    emit_rex(cg, true, 0, 0, r)
+    emit_byte(cg, 0xD3)
+    emit_modrm(cg, 3, 5, r)
+}
+
+§ syscall
+function emit_syscall(cg: ptr<CodeGen>): void {
+    emit_byte(cg, 0x0F)
+    emit_byte(cg, 0x05)
+}
+
+§ --- Symbol Management ---
+
+function add_symbol(cg: ptr<CodeGen>, name_start: u64, name_length: u64, is_external: bool): u64 {
+    declare idx: u64 = dereference(cg).symbol_count
+    if (idx >= MAX_SYMBOLS) { return 0 }
+
+    declare sym: ptr<Symbol> = cast<ptr<Symbol>>(
+        cast<u64>(dereference(cg).symbols) + idx * sizeof(Symbol)
+    )
+    dereference(sym).name_start = name_start
+    dereference(sym).name_length = name_length
+    dereference(sym).offset = 0
+    dereference(sym).section = 0
+    dereference(sym).is_defined = false
+    dereference(sym).is_external = is_external
+    dereference(sym).is_global = true
+
+    dereference(cg).symbol_count = idx + 1
+    return idx
+}
+
+function define_symbol(cg: ptr<CodeGen>, idx: u64, offset: u64): void {
+    declare sym: ptr<Symbol> = cast<ptr<Symbol>>(
+        cast<u64>(dereference(cg).symbols) + idx * sizeof(Symbol)
+    )
+    dereference(sym).offset = offset
+    dereference(sym).is_defined = true
+}
+
+§ --- Relocation Management ---
+
+function add_relocation(cg: ptr<CodeGen>, offset: u64, target: u64, kind: RelocKind, addend: i64): void {
+    declare idx: u64 = dereference(cg).reloc_count
+    if (idx >= MAX_RELOCATIONS) { return }
+
+    declare reloc: ptr<Relocation> = cast<ptr<Relocation>>(
+        cast<u64>(dereference(cg).relocs) + idx * sizeof(Relocation)
+    )
+    dereference(reloc).offset = offset
+    dereference(reloc).target_symbol = target
+    dereference(reloc).kind = kind
+    dereference(reloc).addend = addend
+
+    dereference(cg).reloc_count = idx + 1
+}
+
+§ --- Local Variable Management ---
+
+function push_local(cg: ptr<CodeGen>, name_start: u64, name_length: u64, size: u32): i32 {
+    declare idx: u64 = dereference(cg).local_count
+    if (idx >= MAX_LOCALS) { return 0 }
+
+    § Align size to 8 bytes
+    declare aligned_size: i32 = cast<i32>((size + 7) & ~7)
+    dereference(cg).stack_size = dereference(cg).stack_size + aligned_size
+
+    declare local: ptr<LocalVar> = cast<ptr<LocalVar>>(
+        cast<u64>(dereference(cg).locals) + idx * sizeof(LocalVar)
+    )
+    dereference(local).name_start = name_start
+    dereference(local).name_length = name_length
+    dereference(local).stack_offset = 0 - dereference(cg).stack_size
+    dereference(local).size = cast<u32>(aligned_size)
+
+    dereference(cg).local_count = idx + 1
+    return dereference(local).stack_offset
+}
+
+function reset_locals(cg: ptr<CodeGen>): void {
+    dereference(cg).local_count = 0
+    dereference(cg).stack_size = 0
+}
+
+§ --- Function Prologue / Epilogue ---
+
+function emit_function_prologue(cg: ptr<CodeGen>, stack_space: i32): void {
+    emit_push(cg, Reg64::RBP)
+    emit_mov_reg_reg(cg, Reg64::RBP, Reg64::RSP)
+    if (stack_space > 0) {
+        § Align stack to 16 bytes
+        declare aligned: i32 = (stack_space + 15) & ~15
+        emit_sub_rsp_imm(cg, aligned)
+    }
+}
+
+function emit_function_epilogue(cg: ptr<CodeGen>): void {
+    emit_mov_reg_reg(cg, Reg64::RSP, Reg64::RBP)
+    emit_pop(cg, Reg64::RBP)
+    emit_ret(cg)
+}
+
+§ --- ELF64 Header Generation ---
+
+function emit_elf64_header(cg: ptr<CodeGen>, entry_offset: u64): void {
+    § ELF magic
+    emit_byte(cg, 0x7F)
+    emit_byte(cg, 0x45)  § E
+    emit_byte(cg, 0x4C)  § L
+    emit_byte(cg, 0x46)  § F
+
+    § ELF class (64-bit), data (little-endian), version, OS/ABI
+    emit_byte(cg, 2)     § ELFCLASS64
+    emit_byte(cg, 1)     § ELFDATA2LSB
+    emit_byte(cg, 1)     § EV_CURRENT
+    emit_byte(cg, 0)     § ELFOSABI_NONE
+
+    § Padding (8 bytes)
+    for (declare i: i32 = 0; i < 8; i = i + 1) {
+        emit_byte(cg, 0)
+    }
+
+    § e_type: ET_EXEC
+    emit_u16(cg, 2)
+    § e_machine: EM_X86_64
+    emit_u16(cg, 62)
+    § e_version
+    emit_u32(cg, 1)
+
+    § e_entry: virtual address of entry point
+    declare base_addr: u64 = 0x400000
+    emit_u64(cg, base_addr + 0x78 + entry_offset)
+
+    § e_phoff: program header offset (immediately after ELF header)
+    emit_u64(cg, 0x40)
+    § e_shoff: section header offset (0 = none)
+    emit_u64(cg, 0)
+
+    § e_flags
+    emit_u32(cg, 0)
+    § e_ehsize
+    emit_u16(cg, 64)
+    § e_phentsize
+    emit_u16(cg, 56)
+    § e_phnum
+    emit_u16(cg, 1)
+    § e_shentsize
+    emit_u16(cg, 64)
+    § e_shnum
+    emit_u16(cg, 0)
+    § e_shstrndx
+    emit_u16(cg, 0)
+
+    § Program header (PT_LOAD)
+    § p_type: PT_LOAD
+    emit_u32(cg, 1)
+    § p_flags: PF_R | PF_W | PF_X
+    emit_u32(cg, 7)
+    § p_offset
+    emit_u64(cg, 0)
+    § p_vaddr
+    emit_u64(cg, base_addr)
+    § p_paddr
+    emit_u64(cg, base_addr)
+    § p_filesz (will be patched)
+    emit_u64(cg, 0)
+    § p_memsz (will be patched)
+    emit_u64(cg, 0)
+    § p_align
+    emit_u64(cg, 0x200000)
+}
+
+§ --- PE64 Header Generation ---
+
+function emit_pe64_header(cg: ptr<CodeGen>, entry_offset: u64, code_size: u64): void {
+    § DOS header (MZ stub)
+    emit_byte(cg, 0x4D)  § M
+    emit_byte(cg, 0x5A)  § Z
+    § ... (minimal DOS header)
+    for (declare i: i32 = 0; i < 58; i = i + 1) {
+        emit_byte(cg, 0)
+    }
+    § e_lfanew: offset to PE header
+    emit_u32(cg, 0x80)
+
+    § Padding to PE header
+    for (declare j: i32 = 0; j < 64; j = j + 1) {
+        emit_byte(cg, 0)
+    }
+
+    § PE signature
+    emit_byte(cg, 0x50)  § P
+    emit_byte(cg, 0x45)  § E
+    emit_byte(cg, 0x00)
+    emit_byte(cg, 0x00)
+
+    § COFF header
+    emit_u16(cg, 0x8664)  § Machine: AMD64
+    emit_u16(cg, 1)       § NumberOfSections
+    emit_u32(cg, 0)       § TimeDateStamp
+    emit_u32(cg, 0)       § PointerToSymbolTable
+    emit_u32(cg, 0)       § NumberOfSymbols
+    emit_u16(cg, 240)     § SizeOfOptionalHeader
+    emit_u16(cg, 0x22)    § Characteristics: EXECUTABLE_IMAGE | LARGE_ADDRESS_AWARE
+
+    § Optional header (PE32+)
+    emit_u16(cg, 0x20B)   § Magic: PE32+
+    emit_byte(cg, 1)      § MajorLinkerVersion
+    emit_byte(cg, 0)      § MinorLinkerVersion
+    emit_u32(cg, cast<u32>(code_size))  § SizeOfCode
+    emit_u32(cg, 0)       § SizeOfInitializedData
+    emit_u32(cg, 0)       § SizeOfUninitializedData
+    emit_u32(cg, cast<u32>(0x1000 + entry_offset))  § AddressOfEntryPoint
+    emit_u32(cg, 0x1000)  § BaseOfCode
+
+    § ImageBase
+    emit_u64(cg, 0x140000000)
+    § SectionAlignment, FileAlignment
+    emit_u32(cg, 0x1000)
+    emit_u32(cg, 0x200)
+}
+
+§ --- Condition Code Helpers ---
+
+constant CC_E: u8 = 0x04   § Equal / Zero
+constant CC_NE: u8 = 0x05  § Not equal
+constant CC_L: u8 = 0x0C   § Less (signed)
+constant CC_GE: u8 = 0x0D  § Greater or equal (signed)
+constant CC_LE: u8 = 0x0E  § Less or equal (signed)
+constant CC_G: u8 = 0x0F   § Greater (signed)
+constant CC_B: u8 = 0x02   § Below (unsigned)
+constant CC_AE: u8 = 0x03  § Above or equal (unsigned)
+constant CC_BE: u8 = 0x06  § Below or equal (unsigned)
+constant CC_A: u8 = 0x07   § Above (unsigned)
+
+§ --- Patch Helper ---
+
+function patch_i32_at(cg: ptr<CodeGen>, offset: u64, value: i32): void {
+    declare code: ptr<u8> = dereference(cg).buf.code
+    declare p: u64 = cast<u64>(code) + offset
+    declare uval: u32 = bitcast<u32>(value)
+    dereference(cast<ptr<u8>>(p + 0)) = cast<u8>(uval & 0xFF)
+    dereference(cast<ptr<u8>>(p + 1)) = cast<u8>((uval >> 8) & 0xFF)
+    dereference(cast<ptr<u8>>(p + 2)) = cast<u8>((uval >> 16) & 0xFF)
+    dereference(cast<ptr<u8>>(p + 3)) = cast<u8>((uval >> 24) & 0xFF)
+}
+
+function patch_u64_at(cg: ptr<CodeGen>, offset: u64, value: u64): void {
+    declare code: ptr<u8> = dereference(cg).buf.code
+    declare p: u64 = cast<u64>(code) + offset
+    for (declare i: u64 = 0; i < 8; i = i + 1) {
+        dereference(cast<ptr<u8>>(p + i)) = cast<u8>((value >> (i * 8)) & 0xFF)
+    }
+}
+
+§ --- String Data Emission ---
+
+function emit_string_data(cg: ptr<CodeGen>, source: ptr<u8>, start: u64, length: u64): u64 {
+    declare data_offset: u64 = dereference(cg).buf.data_size
+    § Skip opening/closing quotes
+    for (declare i: u64 = 1; i < length - 1; i = i + 1) {
+        declare c: u8 = dereference(cast<ptr<u8>>(cast<u64>(source) + start + i))
+        if (c == 92 && i + 1 < length - 1) {
+            § Handle escape sequences
+            declare next: u8 = dereference(cast<ptr<u8>>(cast<u64>(source) + start + i + 1))
+            if (next == 110) { emit_data_byte(cg, 10); i = i + 1; continue }      § \n
+            if (next == 116) { emit_data_byte(cg, 9); i = i + 1; continue }       § \t
+            if (next == 114) { emit_data_byte(cg, 13); i = i + 1; continue }      § \r
+            if (next == 48) { emit_data_byte(cg, 0); i = i + 1; continue }        § \0
+            if (next == 92) { emit_data_byte(cg, 92); i = i + 1; continue }       § \\
+            if (next == 34) { emit_data_byte(cg, 34); i = i + 1; continue }       § \"
+        }
+        emit_data_byte(cg, c)
+    }
+    emit_data_byte(cg, 0)  § Null terminator
+    return data_offset
+}

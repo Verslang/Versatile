@@ -1,0 +1,8 @@
+﻿verslang : gui-installer.vlang:1:1: Parse error: Unexpected token: '┬'
+In Zeile:1 Zeichen:79
++ ... installer"; verslang gui-installer.vlang -o gui-installer.exe --forma ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (gui-installer.v...cted token: '┬' 
+   :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 

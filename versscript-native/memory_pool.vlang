@@ -1,0 +1,330 @@
+§ ============================================================================
+§ Versscript Native Module: Memory Pool Allocator
+§ Written in Verslang for fast allocation in the Versscript runtime
+§ Compile: verslang memory_pool.vlang -o memory_pool.o -f obj
+§ ============================================================================
+
+§ --- Constants ---
+
+constant PAGE_SIZE: u64 = 4096
+constant POOL_ALIGNMENT: u64 = 16
+constant POOL_MAGIC: u32 = 0xA110CA7E     § "ALLOCATE"
+constant FREED_MAGIC: u32 = 0xDEADF00D
+constant MAX_POOLS: u32 = 256
+
+§ --- Structures ---
+
+structure BlockHeader {
+    magic: u32,
+    size: u64,
+    is_free: bool,
+    next_free: ptr<BlockHeader>,
+    prev_free: ptr<BlockHeader>,
+    pool_id: u32
+}
+
+structure PoolRegion {
+    base: ptr<u8>,
+    capacity: u64,
+    used: u64,
+    block_size: u64,
+    block_count: u32,
+    free_count: u32,
+    free_list: ptr<BlockHeader>,
+    pool_id: u32,
+    is_active: bool
+}
+
+structure ArenaAllocator {
+    base: ptr<u8>,
+    capacity: u64,
+    offset: u64,
+    high_watermark: u64,
+    allocation_count: u64,
+    is_active: bool
+}
+
+structure MemoryStats {
+    total_allocated: u64,
+    total_freed: u64,
+    current_usage: u64,
+    peak_usage: u64,
+    allocation_count: u64,
+    free_count: u64,
+    pool_count: u32,
+    arena_count: u32
+}
+
+§ --- Global State ---
+
+mutable global_stats: MemoryStats
+
+§ --- Platform Memory Allocation ---
+
+when platform == "linux" {
+    function os_mmap(size: u64): ptr<u8> {
+        declare result: ptr<u8> = cast<ptr<u8>>(0)
+        assembly {
+            mov rax, 9             ; SYS_MMAP
+            xor edi, edi           ; addr = NULL (let kernel choose)
+            mov rsi, [rbp - 8]     ; length
+            mov edx, 3             ; PROT_READ | PROT_WRITE
+            mov r10d, 34           ; MAP_PRIVATE | MAP_ANONYMOUS
+            mov r8d, -1            ; fd = -1
+            xor r9d, r9d          ; offset = 0
+            syscall
+            mov [rbp - 16], rax
+        }
+        return result
+    }
+
+    function os_munmap(addr: ptr<u8>, size: u64): i64 {
+        declare result: i64 = 0
+        assembly {
+            mov rax, 11            ; SYS_MUNMAP
+            mov rdi, [rbp - 8]     ; addr
+            mov rsi, [rbp - 16]    ; length
+            syscall
+            mov [rbp - 24], rax
+        }
+        return result
+    }
+}
+
+when platform == "windows" {
+    external function VirtualAlloc(lpAddress: ptr<u8>, dwSize: u64, flAllocationType: u32, flProtect: u32): ptr<u8>
+    external function VirtualFree(lpAddress: ptr<u8>, dwSize: u64, dwFreeType: u32): i32
+
+    constant MEM_COMMIT: u32 = 0x1000
+    constant MEM_RESERVE: u32 = 0x2000
+    constant MEM_RELEASE: u32 = 0x8000
+    constant PAGE_READWRITE: u32 = 0x04
+
+    function os_mmap(size: u64): ptr<u8> {
+        return VirtualAlloc(cast<ptr<u8>>(0), size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)
+    }
+
+    function os_munmap(addr: ptr<u8>, size: u64): i64 {
+        declare result: i32 = VirtualFree(addr, 0, MEM_RELEASE)
+        return cast<i64>(result)
+    }
+}
+
+§ --- Alignment Utilities ---
+
+function align_up(value: u64, alignment: u64): u64 {
+    return (value + alignment - 1) & (0 - alignment)
+}
+
+function is_aligned(value: u64, alignment: u64): bool {
+    return (value & (alignment - 1)) == 0
+}
+
+§ --- Pool Allocator ---
+
+function pool_init(block_size: u64, block_count: u32): PoolRegion {
+    declare pool: PoolRegion
+
+    § Ensure block_size includes header and is aligned
+    declare actual_block_size: u64 = align_up(block_size + sizeof(BlockHeader), POOL_ALIGNMENT)
+    declare total_size: u64 = actual_block_size * cast<u64>(block_count)
+
+    § Allocate from OS
+    declare mem: ptr<u8> = os_mmap(total_size)
+
+    pool.base = mem
+    pool.capacity = total_size
+    pool.used = 0
+    pool.block_size = actual_block_size
+    pool.block_count = block_count
+    pool.free_count = block_count
+    pool.is_active = true
+
+    § Initialize free list by linking all blocks
+    declare prev: ptr<BlockHeader> = cast<ptr<BlockHeader>>(0)
+    for (declare i: u32 = 0; i < block_count; i = i + 1) {
+        declare offset: u64 = cast<u64>(i) * actual_block_size
+        declare header: ptr<BlockHeader> = cast<ptr<BlockHeader>>(cast<u64>(mem) + offset)
+
+        § Initialize block header
+        dereference(header).magic = POOL_MAGIC
+        dereference(header).size = block_size
+        dereference(header).is_free = true
+        dereference(header).next_free = cast<ptr<BlockHeader>>(0)
+        dereference(header).prev_free = prev
+        dereference(header).pool_id = pool.pool_id
+
+        if (prev != cast<ptr<BlockHeader>>(0)) {
+            dereference(prev).next_free = header
+        }
+
+        if (i == 0) {
+            pool.free_list = header
+        }
+        prev = header
+    }
+
+    § Update global stats
+    global_stats.total_allocated = global_stats.total_allocated + total_size
+    global_stats.pool_count = global_stats.pool_count + 1
+
+    return pool
+}
+
+function pool_alloc(pool: ptr<PoolRegion>): ptr<u8> {
+    declare p: PoolRegion = dereference(pool)
+
+    § Check if pool has free blocks
+    if (p.free_list == cast<ptr<BlockHeader>>(0)) {
+        return cast<ptr<u8>>(0)  § Out of memory
+    }
+
+    § Take first free block
+    declare block: ptr<BlockHeader> = p.free_list
+    declare header: BlockHeader = dereference(block)
+
+    § Validate magic
+    if (header.magic != POOL_MAGIC) {
+        return cast<ptr<u8>>(0)  § Corruption detected
+    }
+
+    § Remove from free list
+    § p.free_list = header.next_free
+    dereference(block).is_free = false
+    p.free_count = p.free_count - 1
+    p.used = p.used + p.block_size
+
+    § Update stats
+    global_stats.allocation_count = global_stats.allocation_count + 1
+    global_stats.current_usage = global_stats.current_usage + p.block_size
+    if (global_stats.current_usage > global_stats.peak_usage) {
+        global_stats.peak_usage = global_stats.current_usage
+    }
+
+    § Return pointer past the header
+    return cast<ptr<u8>>(cast<u64>(block) + sizeof(BlockHeader))
+}
+
+function pool_free(pool: ptr<PoolRegion>, ptr_val: ptr<u8>): bool {
+    § Get block header (before the user data)
+    declare header_addr: u64 = cast<u64>(ptr_val) - sizeof(BlockHeader)
+    declare block: ptr<BlockHeader> = cast<ptr<BlockHeader>>(header_addr)
+    declare header: BlockHeader = dereference(block)
+
+    § Validate magic
+    if (header.magic != POOL_MAGIC) {
+        return false  § Not a valid pool allocation
+    }
+
+    § Check for double-free
+    if (header.is_free) {
+        return false  § Already freed
+    }
+
+    § Mark as free and add to free list
+    dereference(block).is_free = true
+    dereference(block).magic = FREED_MAGIC
+    § Insert at head of free list
+
+    declare p: PoolRegion = dereference(pool)
+    p.free_count = p.free_count + 1
+    p.used = p.used - p.block_size
+
+    global_stats.free_count = global_stats.free_count + 1
+    global_stats.current_usage = global_stats.current_usage - p.block_size
+
+    return true
+}
+
+function pool_destroy(pool: ptr<PoolRegion>): void {
+    declare p: PoolRegion = dereference(pool)
+    if (p.is_active) {
+        os_munmap(p.base, p.capacity)
+        global_stats.total_freed = global_stats.total_freed + p.capacity
+        global_stats.pool_count = global_stats.pool_count - 1
+        dereference(pool).is_active = false
+    }
+}
+
+§ --- Arena Allocator ---
+§ Fast bump allocator: allocations are O(1), freed all at once
+
+function arena_init(capacity: u64): ArenaAllocator {
+    declare arena: ArenaAllocator
+
+    declare mem: ptr<u8> = os_mmap(capacity)
+    arena.base = mem
+    arena.capacity = capacity
+    arena.offset = 0
+    arena.high_watermark = 0
+    arena.allocation_count = 0
+    arena.is_active = true
+
+    global_stats.total_allocated = global_stats.total_allocated + capacity
+    global_stats.arena_count = global_stats.arena_count + 1
+
+    return arena
+}
+
+function arena_alloc(arena: ptr<ArenaAllocator>, size: u64): ptr<u8> {
+    declare a: ArenaAllocator = dereference(arena)
+
+    § Align the allocation
+    declare aligned_offset: u64 = align_up(a.offset, POOL_ALIGNMENT)
+
+    § Check capacity
+    if (aligned_offset + size > a.capacity) {
+        return cast<ptr<u8>>(0)  § Out of memory
+    }
+
+    § Bump the offset
+    declare result: ptr<u8> = cast<ptr<u8>>(cast<u64>(a.base) + aligned_offset)
+    dereference(arena).offset = aligned_offset + size
+    dereference(arena).allocation_count = a.allocation_count + 1
+
+    if (aligned_offset + size > a.high_watermark) {
+        dereference(arena).high_watermark = aligned_offset + size
+    }
+
+    global_stats.allocation_count = global_stats.allocation_count + 1
+    global_stats.current_usage = global_stats.current_usage + size
+
+    return result
+}
+
+function arena_reset(arena: ptr<ArenaAllocator>): void {
+    § Reset offset to 0, keeping the memory mapped
+    declare a: ArenaAllocator = dereference(arena)
+    global_stats.current_usage = global_stats.current_usage - a.offset
+    global_stats.free_count = global_stats.free_count + a.allocation_count
+    dereference(arena).offset = 0
+    dereference(arena).allocation_count = 0
+}
+
+function arena_destroy(arena: ptr<ArenaAllocator>): void {
+    declare a: ArenaAllocator = dereference(arena)
+    if (a.is_active) {
+        os_munmap(a.base, a.capacity)
+        global_stats.total_freed = global_stats.total_freed + a.capacity
+        global_stats.current_usage = global_stats.current_usage - a.offset
+        global_stats.arena_count = global_stats.arena_count - 1
+        dereference(arena).is_active = false
+    }
+}
+
+§ --- Stats Reporting ---
+
+function get_memory_stats(): MemoryStats {
+    return global_stats
+}
+
+function reset_memory_stats(): void {
+    global_stats.total_allocated = 0
+    global_stats.total_freed = 0
+    global_stats.current_usage = 0
+    global_stats.peak_usage = 0
+    global_stats.allocation_count = 0
+    global_stats.free_count = 0
+    global_stats.pool_count = 0
+    global_stats.arena_count = 0
+}

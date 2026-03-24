@@ -1,0 +1,995 @@
+§ ============================================================================
+§ Versatile Language Suite — GUI Installer
+§ Written in Verslang (.vlang) — Low-Level Native Win32 GUI with Stepper
+§ Uses direct Win32 API calls via external function declarations
+§
+§ Compile: verslang gui-installer.vlang -o VersatileSetup.exe -f pe64
+§ ============================================================================
+
+§ ========================= Win32 Type Aliases =========================
+§ HWND, HDC, HINSTANCE, etc. are all pointer-sized handles
+
+§ ========================= External Win32 API =========================
+
+§ --- Core System ---
+external function GetModuleHandleW(lpModuleName: ptr<u8>): ptr<void>
+external function ExitProcess(uExitCode: u32): void
+external function GetLastError(): u32
+external function Sleep(dwMilliseconds: u32): void
+
+§ --- Window Class & Creation ---
+external function RegisterClassExW(lpWndClassEx: ptr<u8>): u16
+external function CreateWindowExW(
+    dwExStyle: u32, lpClassName: ptr<u8>, lpWindowName: ptr<u8>,
+    dwStyle: u32, x: i32, y: i32, nWidth: i32, nHeight: i32,
+    hWndParent: ptr<void>, hMenu: ptr<void>, hInstance: ptr<void>,
+    lpParam: ptr<void>
+): ptr<void>
+external function ShowWindow(hWnd: ptr<void>, nCmdShow: i32): i32
+external function UpdateWindow(hWnd: ptr<void>): i32
+external function DestroyWindow(hWnd: ptr<void>): i32
+external function PostQuitMessage(nExitCode: i32): void
+external function DefWindowProcW(hWnd: ptr<void>, uMsg: u32, wParam: u64, lParam: i64): i64
+external function InvalidateRect(hWnd: ptr<void>, lpRect: ptr<u8>, bErase: i32): i32
+external function SetTimer(hWnd: ptr<void>, nIDEvent: u64, uElapse: u32, lpTimerFunc: ptr<void>): u64
+external function KillTimer(hWnd: ptr<void>, uIDEvent: u64): i32
+
+§ --- Message Loop ---
+external function GetMessageW(lpMsg: ptr<u8>, hWnd: ptr<void>, wMsgFilterMin: u32, wMsgFilterMax: u32): i32
+external function TranslateMessage(lpMsg: ptr<u8>): i32
+external function DispatchMessageW(lpMsg: ptr<u8>): i64
+
+§ --- GDI Drawing ---
+external function GetDC(hWnd: ptr<void>): ptr<void>
+external function ReleaseDC(hWnd: ptr<void>, hDC: ptr<void>): i32
+external function BeginPaint(hWnd: ptr<void>, lpPaint: ptr<u8>): ptr<void>
+external function EndPaint(hWnd: ptr<void>, lpPaint: ptr<u8>): i32
+external function CreateSolidBrush(color: u32): ptr<void>
+external function CreatePen(iStyle: i32, cWidth: i32, color: u32): ptr<void>
+external function SelectObject(hdc: ptr<void>, h: ptr<void>): ptr<void>
+external function DeleteObject(hGdiObj: ptr<void>): i32
+external function SetBkMode(hdc: ptr<void>, mode: i32): i32
+external function SetTextColor(hdc: ptr<void>, color: u32): u32
+external function SetBkColor(hdc: ptr<void>, color: u32): u32
+external function TextOutW(hdc: ptr<void>, x: i32, y: i32, lpString: ptr<u8>, c: i32): i32
+external function Rectangle(hdc: ptr<void>, left: i32, top: i32, right: i32, bottom: i32): i32
+external function FillRect(hdc: ptr<void>, lprc: ptr<u8>, hbr: ptr<void>): i32
+external function MoveToEx(hdc: ptr<void>, x: i32, y: i32, lppt: ptr<u8>): i32
+external function LineTo(hdc: ptr<void>, x: i32, y: i32): i32
+external function CreateFontW(
+    cHeight: i32, cWidth: i32, cEscapement: i32, cOrientation: i32,
+    cWeight: i32, bItalic: u32, bUnderline: u32, bStrikeOut: u32,
+    iCharSet: u32, iOutPrecision: u32, iClipPrecision: u32,
+    iQuality: u32, iPitchAndFamily: u32, pszFaceName: ptr<u8>
+): ptr<void>
+external function RoundRect(hdc: ptr<void>, left: i32, top: i32, right: i32, bottom: i32, w: i32, h: i32): i32
+
+§ --- Double Buffering ---
+external function CreateCompatibleDC(hdc: ptr<void>): ptr<void>
+external function CreateCompatibleBitmap(hdc: ptr<void>, cx: i32, cy: i32): ptr<void>
+external function BitBlt(hdcDest: ptr<void>, x: i32, y: i32, cx: i32, cy: i32, hdcSrc: ptr<void>, x1: i32, y1: i32, rop: u32): i32
+external function DeleteDC(hdc: ptr<void>): i32
+
+§ --- Cursor & Screen ---
+external function LoadCursorW(hInstance: ptr<void>, lpCursorName: ptr<u8>): ptr<void>
+external function GetSystemMetrics(nIndex: i32): i32
+external function SetWindowPos(hWnd: ptr<void>, hWndAfter: ptr<void>, x: i32, y: i32, cx: i32, cy: i32, uFlags: u32): i32
+external function GetClientRect(hWnd: ptr<void>, lpRect: ptr<u8>): i32
+
+§ --- DWM (Dark Title Bar) ---
+external function DwmSetWindowAttribute(hwnd: ptr<void>, dwAttribute: u32, pvAttribute: ptr<u8>, cbAttribute: u32): i32
+
+§ --- Console Output (for debug) ---
+external function GetStdHandle(nStdHandle: i32): ptr<void>
+external function WriteConsoleA(hConsole: ptr<void>, lpBuffer: ptr<u8>, nChars: u32, lpWritten: ptr<u32>, lpReserved: ptr<void>): i32
+
+§ --- File System ---
+external function CreateDirectoryW(lpPathName: ptr<u8>, lpSecurityAttributes: ptr<u8>): i32
+external function CopyFileW(lpExistingFileName: ptr<u8>, lpNewFileName: ptr<u8>, bFailIfExists: i32): i32
+external function GetFileAttributesW(lpFileName: ptr<u8>): u32
+external function GetModuleFileNameW(hModule: ptr<void>, lpFilename: ptr<u8>, nSize: u32): u32
+
+§ --- Registry ---
+external function RegSetKeyValueW(hKey: ptr<void>, lpSubKey: ptr<u8>, lpValueName: ptr<u8>, dwType: u32, lpData: ptr<u8>, cbData: u32): i32
+
+§ --- Shell ---
+external function ShellExecuteW(hwnd: ptr<void>, lpOperation: ptr<u8>, lpFile: ptr<u8>, lpParameters: ptr<u8>, lpDirectory: ptr<u8>, nShowCmd: i32): ptr<void>
+
+§ --- Common Controls ---
+external function InitCommonControlsEx(lpInitCtrls: ptr<u8>): i32
+
+§ ========================= Constants =========================
+
+constant WS_OVERLAPPED: u32       = 0x00000000
+constant WS_CAPTION: u32          = 0x00C00000
+constant WS_SYSMENU: u32          = 0x00080000
+constant WS_MINIMIZEBOX: u32      = 0x00020000
+constant WS_VISIBLE: u32          = 0x10000000
+constant WS_CHILD: u32            = 0x40000000
+constant WS_EX_APPWINDOW: u32     = 0x00040000
+
+constant WM_CREATE: u32           = 0x0001
+constant WM_DESTROY: u32          = 0x0002
+constant WM_PAINT: u32            = 0x000F
+constant WM_CLOSE: u32            = 0x0010
+constant WM_COMMAND: u32          = 0x0111
+constant WM_TIMER: u32            = 0x0113
+constant WM_LBUTTONDOWN: u32      = 0x0201
+constant WM_ERASEBKGND: u32       = 0x0014
+
+constant SW_SHOW: i32             = 5
+constant TRANSPARENT: i32         = 1
+constant SRCCOPY: u32             = 0x00CC0020
+constant INVALID_FILE_ATTRIBUTES: u32 = 0xFFFFFFFF
+constant DEFAULT_CHARSET: u32     = 1
+constant CLEARTYPE_QUALITY: u32   = 5
+constant FW_NORMAL: i32           = 400
+constant FW_SEMIBOLD: i32         = 600
+constant FW_LIGHT: i32            = 300
+constant IDC_ARROW: u64           = 32512
+
+constant SM_CXSCREEN: i32         = 0
+constant SM_CYSCREEN: i32         = 1
+constant SWP_NOZORDER: u32        = 0x0004
+
+§ DWM dark mode attribute
+constant DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20
+
+§ ========================= Theme Colors (COLORREF = 0x00BBGGRR) =========================
+§ Note: Win32 COLORREF is BGR, not RGB
+
+constant CLR_BG_DARK: u32         = 0x001E1E1E
+constant CLR_BG_PANEL: u32        = 0x00262625
+constant CLR_BG_CARD: u32         = 0x00302D2D
+constant CLR_BG_INPUT: u32        = 0x00373333
+constant CLR_ACCENT: u32          = 0x00CC7A00
+constant CLR_ACCENT_GREEN: u32    = 0x00B0C94E
+constant CLR_ACCENT_ORANGE: u32   = 0x003491CE
+constant CLR_TEXT_PRIMARY: u32    = 0x00CCCCCC
+constant CLR_TEXT_SECONDARY: u32  = 0x00999999
+constant CLR_TEXT_DIM: u32        = 0x006A6A6A
+constant CLR_SUCCESS: u32         = 0x00B0C94E
+constant CLR_WARNING: u32         = 0x003491CE
+constant CLR_ERROR: u32           = 0x004747F4
+constant CLR_WHITE: u32           = 0x00FFFFFF
+constant CLR_BORDER: u32          = 0x00464040
+
+§ ========================= Application Constants =========================
+
+constant WINDOW_WIDTH: i32        = 820
+constant WINDOW_HEIGHT: i32       = 560
+constant SIDEBAR_WIDTH: i32       = 240
+constant TOTAL_PAGES: i32         = 6
+constant TIMER_INSTALL: u64       = 1
+
+§ ========================= Global State =========================
+
+structure InstallerState {
+    hWnd: ptr<void>,
+    hInstance: ptr<void>,
+    currentPage: i32,
+    hoverButton: i32,
+
+    § Fonts
+    fontTitle: ptr<void>,
+    fontBody: ptr<void>,
+    fontSmall: ptr<void>,
+    fontBold: ptr<void>,
+
+    § Selection
+    installVerslang: bool,
+    installVersscript: bool,
+
+    § Progress
+    progress: i32,
+    installStep: i32,
+    installDone: bool,
+    installSuccess: bool
+}
+
+§ Global installer state
+mutable g: InstallerState
+
+§ ========================= Utility Functions =========================
+
+function rgb(r: u32, g_val: u32, b: u32): u32 {
+    return (b << 16) | (g_val << 8) | r
+}
+
+function make_rect(buf: ptr<u8>, left: i32, top: i32, right: i32, bottom: i32): void {
+    § RECT structure: 4x i32 = 16 bytes
+    declare p: ptr<i32> = cast<ptr<i32>>(buf)
+    dereference(p) = left
+    dereference(cast<ptr<i32>>(cast<u64>(p) + 4)) = top
+    dereference(cast<ptr<i32>>(cast<u64>(p) + 8)) = right
+    dereference(cast<ptr<i32>>(cast<u64>(p) + 12)) = bottom
+}
+
+function fill_rect_color(hdc: ptr<void>, left: i32, top: i32, right: i32, bottom: i32, color: u32): void {
+    declare rc: array<u8, 16>
+    make_rect(cast<ptr<u8>>(address_of(rc)), left, top, right, bottom)
+    declare brush: ptr<void> = CreateSolidBrush(color)
+    FillRect(hdc, cast<ptr<u8>>(address_of(rc)), brush)
+    DeleteObject(brush)
+}
+
+function draw_text(hdc: ptr<void>, text: ptr<u8>, text_len: i32, x: i32, y: i32, color: u32, font: ptr<void>): void {
+    declare oldFont: ptr<void> = SelectObject(hdc, font)
+    SetTextColor(hdc, color)
+    SetBkMode(hdc, TRANSPARENT)
+    TextOutW(hdc, x, y, text, text_len)
+    SelectObject(hdc, oldFont)
+}
+
+function draw_line(hdc: ptr<void>, x1: i32, y1: i32, x2: i32, y2: i32, color: u32): void {
+    declare pen: ptr<void> = CreatePen(0, 1, color)
+    declare oldPen: ptr<void> = SelectObject(hdc, pen)
+    MoveToEx(hdc, x1, y1, cast<ptr<u8>>(0))
+    LineTo(hdc, x2, y2)
+    SelectObject(hdc, oldPen)
+    DeleteObject(pen)
+}
+
+function draw_round_rect(hdc: ptr<void>, left: i32, top: i32, right: i32, bottom: i32, radius: i32, fill: u32, border: u32): void {
+    declare brush: ptr<void> = CreateSolidBrush(fill)
+    declare pen: ptr<void> = CreatePen(0, 1, border)
+    declare oldBrush: ptr<void> = SelectObject(hdc, brush)
+    declare oldPen: ptr<void> = SelectObject(hdc, pen)
+    RoundRect(hdc, left, top, right, bottom, radius, radius)
+    SelectObject(hdc, oldBrush)
+    SelectObject(hdc, oldPen)
+    DeleteObject(brush)
+    DeleteObject(pen)
+}
+
+function file_exists(path: ptr<u8>): bool {
+    declare attr: u32 = GetFileAttributesW(path)
+    return attr != INVALID_FILE_ATTRIBUTES
+}
+
+§ ========================= Draw Sidebar =========================
+
+function draw_sidebar(hdc: ptr<void>): void {
+    § Background
+    fill_rect_color(hdc, 0, 0, SIDEBAR_WIDTH, WINDOW_HEIGHT, CLR_BG_PANEL)
+
+    § Border
+    draw_line(hdc, SIDEBAR_WIDTH, 0, SIDEBAR_WIDTH, WINDOW_HEIGHT, CLR_BORDER)
+
+    § Logo "V"
+    declare logo_v: array<u8, 4> = "V\0"
+    draw_text(hdc, cast<ptr<u8>>(address_of(logo_v)), 1, 105, 20, CLR_ACCENT, g.fontTitle)
+
+    § Title
+    declare title: array<u8, 36> = "V\0e\0r\0s\0a\0t\0i\0l\0e\0 \0S\0u\0i\0t\0e\0\0\0"
+    draw_text(hdc, cast<ptr<u8>>(address_of(title)), 15, 50, 65, CLR_TEXT_PRIMARY, g.fontBody)
+
+    § Version
+    declare ver: array<u8, 24> = "V\0e\0r\0s\0i\0o\0n\0 \01\0.\00\0\0\0"
+    draw_text(hdc, cast<ptr<u8>>(address_of(ver)), 11, 70, 90, CLR_TEXT_DIM, g.fontSmall)
+
+    § Step indicators
+    declare step_names_0: array<u8, 16> = "W\0e\0l\0c\0o\0m\0e\0\0\0"
+    declare step_names_1: array<u8, 18> = "P\0r\0o\0d\0u\0c\0t\0s\0\0\0"
+    declare step_names_2: array<u8, 22> = "C\0o\0m\0p\0o\0n\0e\0n\0t\0s\0\0\0"
+    declare step_names_3: array<u8, 18> = "L\0o\0c\0a\0t\0i\0o\0n\0\0\0"
+    declare step_names_4: array<u8, 22> = "I\0n\0s\0t\0a\0l\0l\0i\0n\0g\0\0\0"
+    declare step_names_5: array<u8, 18> = "C\0o\0m\0p\0l\0e\0t\0e\0\0\0"
+
+    declare step_lens: array<i32, 6> = [7, 8, 10, 8, 10, 8]
+    declare step_ptrs: array<ptr<u8>, 6> = [
+        cast<ptr<u8>>(address_of(step_names_0)),
+        cast<ptr<u8>>(address_of(step_names_1)),
+        cast<ptr<u8>>(address_of(step_names_2)),
+        cast<ptr<u8>>(address_of(step_names_3)),
+        cast<ptr<u8>>(address_of(step_names_4)),
+        cast<ptr<u8>>(address_of(step_names_5))
+    ]
+
+    for (declare i: i32 = 0; i < TOTAL_PAGES; i = i + 1) {
+        declare sy: i32 = 140 + i * 48
+        declare text_color: u32 = CLR_TEXT_DIM
+
+        if (i < g.currentPage) {
+            § Completed step - green
+            text_color = CLR_SUCCESS
+            § Draw check mark circle
+            fill_rect_color(hdc, 24, sy, 46, sy + 22, CLR_SUCCESS)
+        } else if (i == g.currentPage) {
+            § Current step - white with accent bar
+            text_color = CLR_WHITE
+            fill_rect_color(hdc, 0, sy - 2, 3, sy + 24, CLR_ACCENT)
+            fill_rect_color(hdc, 24, sy, 46, sy + 22, CLR_ACCENT)
+        } else {
+            § Future step - dim
+            fill_rect_color(hdc, 24, sy, 46, sy + 22, CLR_BG_CARD)
+        }
+
+        § Step number
+        declare num_buf: array<u8, 4>
+        declare digit: u8 = cast<u8>(49 + i)  § '1' = 49
+        dereference(cast<ptr<u8>>(address_of(num_buf))) = digit
+        dereference(cast<ptr<u8>>(cast<u64>(address_of(num_buf)) + 1)) = 0
+        draw_text(hdc, cast<ptr<u8>>(address_of(num_buf)), 1, 31, sy + 2, CLR_BG_DARK, g.fontSmall)
+
+        § Step name
+        declare name_ptr: ptr<u8> = step_ptrs[i]
+        declare name_len: i32 = step_lens[i]
+        draw_text(hdc, name_ptr, name_len, 56, sy + 2, text_color, g.fontBody)
+    }
+
+    § Footer
+    declare footer: array<u8, 32> = "\xA9\0 \02\00\02\06\0 \0L\0o\0n\0i\0d\0e\0v\0\0\0"
+    draw_text(hdc, cast<ptr<u8>>(address_of(footer)), 15, 55, WINDOW_HEIGHT - 40, CLR_TEXT_DIM, g.fontSmall)
+}
+
+§ ========================= Draw Navigation Buttons =========================
+
+function draw_nav_buttons(hdc: ptr<void>): void {
+    declare by: i32 = WINDOW_HEIGHT - 60
+    declare bw: i32 = 90
+    declare bh: i32 = 32
+
+    § Back button (pages 1-3 only)
+    if (g.currentPage > 0 && g.currentPage < 4) {
+        draw_round_rect(hdc, SIDEBAR_WIDTH + 20, by, SIDEBAR_WIDTH + 20 + bw, by + bh, 6, CLR_BG_CARD, CLR_BORDER)
+        declare back_t: array<u8, 12> = "\x2190\0 \0B\0a\0c\0k\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(back_t)), 6, SIDEBAR_WIDTH + 35, by + 7, CLR_TEXT_PRIMARY, g.fontSmall)
+    }
+
+    § Next / Install / Finish button
+    if (g.currentPage < 4) {
+        declare nx: i32 = WINDOW_WIDTH - 120
+        draw_round_rect(hdc, nx, by, nx + bw, by + bh, 6, CLR_ACCENT, CLR_ACCENT)
+
+        if (g.currentPage == 3) {
+            declare inst_t: array<u8, 16> = "I\0n\0s\0t\0a\0l\0l\0\0\0"
+            draw_text(hdc, cast<ptr<u8>>(address_of(inst_t)), 7, nx + 18, by + 7, CLR_WHITE, g.fontBold)
+        } else {
+            declare next_t: array<u8, 16> = "N\0e\0x\0t\0 \0\x2192\0\0\0"
+            draw_text(hdc, cast<ptr<u8>>(address_of(next_t)), 6, nx + 18, by + 7, CLR_WHITE, g.fontBold)
+        }
+    } else if (g.currentPage == 5) {
+        declare nx: i32 = WINDOW_WIDTH - 120
+        draw_round_rect(hdc, nx, by, nx + bw, by + bh, 6, CLR_ACCENT, CLR_ACCENT)
+        declare fin_t: array<u8, 14> = "F\0i\0n\0i\0s\0h\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(fin_t)), 6, nx + 18, by + 7, CLR_WHITE, g.fontBold)
+    }
+
+    § Cancel button (pages 0-3)
+    if (g.currentPage < 4) {
+        declare cx: i32 = WINDOW_WIDTH - 220
+        draw_round_rect(hdc, cx, by, cx + bw, by + bh, 6, CLR_BG_CARD, CLR_BORDER)
+        declare cancel_t: array<u8, 14> = "C\0a\0n\0c\0e\0l\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(cancel_t)), 6, cx + 18, by + 7, CLR_TEXT_PRIMARY, g.fontSmall)
+    }
+}
+
+§ ========================= Page Renderers =========================
+
+function draw_welcome_page(hdc: ptr<void>): void {
+    declare left: i32 = SIDEBAR_WIDTH + 30
+    declare top: i32 = 30
+
+    declare title: array<u8, 88> = "W\0e\0l\0c\0o\0m\0e\0 \0t\0o\0 \0t\0h\0e\0 \0V\0e\0r\0s\0a\0t\0i\0l\0e\0 \0S\0u\0i\0t\0e\0 \0I\0n\0s\0t\0a\0l\0l\0e\0r\0\0\0"
+    draw_text(hdc, cast<ptr<u8>>(address_of(title)), 40, left, top, CLR_WHITE, g.fontTitle)
+
+    declare sub1: array<u8, 92> = "T\0h\0i\0s\0 \0w\0i\0z\0a\0r\0d\0 \0w\0i\0l\0l\0 \0i\0n\0s\0t\0a\0l\0l\0 \0V\0e\0r\0s\0l\0a\0n\0g\0 \0+\0 \0V\0e\0r\0s\0s\0c\0r\0i\0p\0t\0\0\0"
+    draw_text(hdc, cast<ptr<u8>>(address_of(sub1)), 45, left, top + 45, CLR_TEXT_SECONDARY, g.fontBody)
+
+    § Verslang card
+    declare y: i32 = top + 100
+    draw_round_rect(hdc, left, y, WINDOW_WIDTH - 30, y + 60, 8, CLR_BG_CARD, CLR_ACCENT_GREEN)
+    declare vl_name: array<u8, 36> = "V\0e\0r\0s\0l\0a\0n\0g\0 \0C\0o\0m\0p\0i\0l\0e\0r\0\0\0"
+    draw_text(hdc, cast<ptr<u8>>(address_of(vl_name)), 17, left + 20, y + 8, CLR_ACCENT_GREEN, g.fontBold)
+    declare vl_desc: array<u8, 80> = "L\0o\0w\0-\0l\0e\0v\0e\0l\0 \0s\0y\0s\0t\0e\0m\0s\0 \0p\0r\0o\0g\0r\0a\0m\0m\0i\0n\0g\0 \0l\0a\0n\0g\0u\0a\0g\0e\0\0\0"
+    draw_text(hdc, cast<ptr<u8>>(address_of(vl_desc)), 38, left + 20, y + 32, CLR_TEXT_DIM, g.fontSmall)
+
+    § Versscript card
+    y = y + 70
+    draw_round_rect(hdc, left, y, WINDOW_WIDTH - 30, y + 60, 8, CLR_BG_CARD, CLR_ACCENT_ORANGE)
+    declare vs_name: array<u8, 38> = "V\0e\0r\0s\0s\0c\0r\0i\0p\0t\0 \0R\0u\0n\0t\0i\0m\0e\0\0\0"
+    draw_text(hdc, cast<ptr<u8>>(address_of(vs_name)), 18, left + 20, y + 8, CLR_ACCENT_ORANGE, g.fontBold)
+    declare vs_desc: array<u8, 100> = "M\0o\0d\0e\0r\0n\0 \0s\0c\0r\0i\0p\0t\0i\0n\0g\0 \0l\0a\0n\0g\0u\0a\0g\0e\0 \0f\0o\0r\0 \0c\0r\0e\0a\0t\0i\0v\0e\0 \0d\0e\0v\0e\0l\0o\0p\0e\0r\0s\0\0\0"
+    draw_text(hdc, cast<ptr<u8>>(address_of(vs_desc)), 47, left + 20, y + 32, CLR_TEXT_DIM, g.fontSmall)
+
+    § System info
+    y = y + 90
+    declare info_hdr: array<u8, 40> = "S\0y\0s\0t\0e\0m\0 \0I\0n\0f\0o\0r\0m\0a\0t\0i\0o\0n\0\0\0"
+    draw_text(hdc, cast<ptr<u8>>(address_of(info_hdr)), 18, left, y, CLR_ACCENT, g.fontBold)
+
+    y = y + 28
+    when platform == "windows" {
+        declare plat_w: array<u8, 40> = "P\0l\0a\0t\0f\0o\0r\0m\0:\0 \0W\0i\0n\0d\0o\0w\0s\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(plat_w)), 17, left + 10, y, CLR_TEXT_DIM, g.fontSmall)
+    }
+}
+
+function draw_products_page(hdc: ptr<void>): void {
+    declare left: i32 = SIDEBAR_WIDTH + 30
+    declare top: i32 = 30
+    declare cw: i32 = WINDOW_WIDTH - SIDEBAR_WIDTH - 60
+
+    declare title: array<u8, 34> = "S\0e\0l\0e\0c\0t\0 \0P\0r\0o\0d\0u\0c\0t\0s\0\0\0"
+    draw_text(hdc, cast<ptr<u8>>(address_of(title)), 15, left, top, CLR_WHITE, g.fontTitle)
+
+    declare sub: array<u8, 76> = "C\0h\0o\0o\0s\0e\0 \0w\0h\0i\0c\0h\0 \0l\0a\0n\0g\0u\0a\0g\0e\0s\0 \0t\0o\0 \0i\0n\0s\0t\0a\0l\0l\0.\0\0\0"
+    draw_text(hdc, cast<ptr<u8>>(address_of(sub)), 34, left, top + 40, CLR_TEXT_SECONDARY, g.fontBody)
+
+    declare y: i32 = top + 90
+
+    § Verslang checkbox card
+    declare vl_fill: u32 = CLR_BG_CARD
+    declare vl_border: u32 = CLR_BORDER
+    if (g.installVerslang) {
+        vl_fill = rgb(35, 50, 45)
+        vl_border = CLR_ACCENT_GREEN
+    }
+    draw_round_rect(hdc, left, y, left + cw, y + 80, 10, vl_fill, vl_border)
+
+    § Checkbox indicator
+    if (g.installVerslang) {
+        fill_rect_color(hdc, left + 20, y + 12, left + 36, y + 28, CLR_ACCENT_GREEN)
+        declare chk: array<u8, 4> = "\x2713\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(chk)), 1, left + 22, y + 10, CLR_BG_DARK, g.fontSmall)
+    } else {
+        draw_round_rect(hdc, left + 20, y + 12, left + 36, y + 28, 2, CLR_BG_INPUT, CLR_BORDER)
+    }
+
+    declare vl_t: array<u8, 36> = "V\0e\0r\0s\0l\0a\0n\0g\0 \0C\0o\0m\0p\0i\0l\0e\0r\0\0\0"
+    draw_text(hdc, cast<ptr<u8>>(address_of(vl_t)), 17, left + 45, y + 10, CLR_TEXT_PRIMARY, g.fontBold)
+
+    declare vl_d: array<u8, 98> = "C\0o\0m\0p\0i\0l\0e\0s\0 \0t\0o\0 \0n\0a\0t\0i\0v\0e\0 \0x\08\06\0-\06\04\0 \0(\0E\0L\0F\0,\0 \0P\0E\0,\0 \0f\0l\0a\0t\0 \0b\0i\0n\0a\0r\0y\0)\0\0\0"
+    draw_text(hdc, cast<ptr<u8>>(address_of(vl_d)), 47, left + 45, y + 35, CLR_TEXT_DIM, g.fontSmall)
+
+    declare vl_src: array<u8, 52> = "\x2714\0 \0B\0u\0i\0l\0t\0-\0i\0n\0 \0s\0o\0u\0r\0c\0e\0 \0f\0o\0u\0n\0d\0\0\0"
+    draw_text(hdc, cast<ptr<u8>>(address_of(vl_src)), 23, left + 45, y + 55, CLR_SUCCESS, g.fontSmall)
+
+    y = y + 95
+
+    § Versscript checkbox card
+    declare vs_fill: u32 = CLR_BG_CARD
+    declare vs_border: u32 = CLR_BORDER
+    if (g.installVersscript) {
+        vs_fill = rgb(50, 42, 30)
+        vs_border = CLR_ACCENT_ORANGE
+    }
+    draw_round_rect(hdc, left, y, left + cw, y + 80, 10, vs_fill, vs_border)
+
+    if (g.installVersscript) {
+        fill_rect_color(hdc, left + 20, y + 12, left + 36, y + 28, CLR_ACCENT_ORANGE)
+        declare chk2: array<u8, 4> = "\x2713\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(chk2)), 1, left + 22, y + 10, CLR_BG_DARK, g.fontSmall)
+    } else {
+        draw_round_rect(hdc, left + 20, y + 12, left + 36, y + 28, 2, CLR_BG_INPUT, CLR_BORDER)
+    }
+
+    declare vs_t: array<u8, 38> = "V\0e\0r\0s\0s\0c\0r\0i\0p\0t\0 \0R\0u\0n\0t\0i\0m\0e\0\0\0"
+    draw_text(hdc, cast<ptr<u8>>(address_of(vs_t)), 18, left + 45, y + 10, CLR_TEXT_PRIMARY, g.fontBold)
+
+    declare vs_d: array<u8, 100> = "5\00\00\0+\0 \0b\0u\0i\0l\0t\0-\0i\0n\0 \0f\0u\0n\0c\0t\0i\0o\0n\0s\0,\0 \09\05\0+\0 \0m\0o\0d\0u\0l\0e\0s\0,\0 \0R\0E\0P\0L\0,\0 \0G\0U\0I\0\0\0"
+    draw_text(hdc, cast<ptr<u8>>(address_of(vs_d)), 47, left + 45, y + 35, CLR_TEXT_DIM, g.fontSmall)
+
+    declare vs_src: array<u8, 52> = "\x2714\0 \0B\0u\0i\0l\0t\0-\0i\0n\0 \0s\0o\0u\0r\0c\0e\0 \0f\0o\0u\0n\0d\0\0\0"
+    draw_text(hdc, cast<ptr<u8>>(address_of(vs_src)), 23, left + 45, y + 55, CLR_SUCCESS, g.fontSmall)
+}
+
+function draw_components_page(hdc: ptr<void>): void {
+    declare left: i32 = SIDEBAR_WIDTH + 30
+    declare top: i32 = 30
+
+    declare title: array<u8, 38> = "S\0e\0l\0e\0c\0t\0 \0C\0o\0m\0p\0o\0n\0e\0n\0t\0s\0\0\0"
+    draw_text(hdc, cast<ptr<u8>>(address_of(title)), 17, left, top, CLR_WHITE, g.fontTitle)
+
+    declare y: i32 = top + 60
+
+    § Verslang section
+    if (g.installVerslang) {
+        declare hdr_vl: array<u8, 18> = "V\0e\0r\0s\0l\0a\0n\0g\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(hdr_vl)), 8, left, y, CLR_ACCENT_GREEN, g.fontBold)
+        y = y + 26
+
+        § Draw checkboxes as text items
+        declare c1: array<u8, 44> = "[\0x\0]\0 \0C\0o\0m\0p\0i\0l\0e\0r\0 \0(\0r\0e\0q\0u\0i\0r\0e\0d\0)\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(c1)), 22, left + 10, y, CLR_TEXT_PRIMARY, g.fontBody)
+        y = y + 22
+
+        declare c2: array<u8, 36> = "[\0x\0]\0 \0S\0t\0a\0n\0d\0a\0r\0d\0 \0L\0i\0b\0r\0a\0r\0y\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(c2)), 18, left + 10, y, CLR_TEXT_PRIMARY, g.fontBody)
+        y = y + 22
+
+        declare c3: array<u8, 20> = "[\0x\0]\0 \0E\0x\0a\0m\0p\0l\0e\0s\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(c3)), 12, left + 10, y, CLR_TEXT_PRIMARY, g.fontBody)
+        y = y + 22
+
+        declare c4: array<u8, 28> = "[\0x\0]\0 \0A\0d\0d\0 \0t\0o\0 \0P\0A\0T\0H\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(c4)), 15, left + 10, y, CLR_TEXT_PRIMARY, g.fontBody)
+        y = y + 22
+
+        declare c5: array<u8, 44> = "[\0x\0]\0 \0.\0v\0l\0a\0n\0g\0 \0f\0i\0l\0e\0 \0a\0s\0s\0o\0c\0.\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(c5)), 22, left + 10, y, CLR_TEXT_PRIMARY, g.fontBody)
+        y = y + 22
+
+        declare c6: array<u8, 42> = "[\0x\0]\0 \0V\0S\0 \0C\0o\0d\0e\0 \0E\0x\0t\0e\0n\0s\0i\0o\0n\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(c6)), 21, left + 10, y, CLR_TEXT_PRIMARY, g.fontBody)
+        y = y + 34
+    }
+
+    § Versscript section
+    if (g.installVersscript) {
+        declare hdr_vs: array<u8, 22> = "V\0e\0r\0s\0s\0c\0r\0i\0p\0t\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(hdr_vs)), 10, left, y, CLR_ACCENT_ORANGE, g.fontBold)
+        y = y + 26
+
+        declare r1: array<u8, 42> = "[\0x\0]\0 \0R\0u\0n\0t\0i\0m\0e\0 \0(\0r\0e\0q\0u\0i\0r\0e\0d\0)\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(r1)), 21, left + 10, y, CLR_TEXT_PRIMARY, g.fontBody)
+        y = y + 22
+
+        declare r2: array<u8, 32> = "[\0x\0]\0 \0E\0x\0a\0m\0p\0l\0e\0 \0S\0c\0r\0i\0p\0t\0s\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(r2)), 19, left + 10, y, CLR_TEXT_PRIMARY, g.fontBody)
+        y = y + 22
+
+        declare r3: array<u8, 30> = "[\0x\0]\0 \0D\0o\0c\0u\0m\0e\0n\0t\0a\0t\0i\0o\0n\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(r3)), 17, left + 10, y, CLR_TEXT_PRIMARY, g.fontBody)
+        y = y + 22
+
+        declare r4: array<u8, 28> = "[\0x\0]\0 \0A\0d\0d\0 \0t\0o\0 \0P\0A\0T\0H\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(r4)), 15, left + 10, y, CLR_TEXT_PRIMARY, g.fontBody)
+        y = y + 22
+
+        declare r5: array<u8, 48> = "[\0x\0]\0 \0.\0v\0s\0/\0.\0v\0e\0r\0s\0s\0 \0f\0i\0l\0e\0 \0a\0s\0s\0o\0c\0.\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(r5)), 26, left + 10, y, CLR_TEXT_PRIMARY, g.fontBody)
+        y = y + 22
+
+        declare r6: array<u8, 42> = "[\0x\0]\0 \0V\0S\0 \0C\0o\0d\0e\0 \0E\0x\0t\0e\0n\0s\0i\0o\0n\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(r6)), 21, left + 10, y, CLR_TEXT_PRIMARY, g.fontBody)
+    }
+}
+
+function draw_location_page(hdc: ptr<void>): void {
+    declare left: i32 = SIDEBAR_WIDTH + 30
+    declare top: i32 = 30
+    declare cw: i32 = WINDOW_WIDTH - SIDEBAR_WIDTH - 60
+
+    declare title: array<u8, 38> = "I\0n\0s\0t\0a\0l\0l\0 \0L\0o\0c\0a\0t\0i\0o\0n\0\0\0"
+    draw_text(hdc, cast<ptr<u8>>(address_of(title)), 16, left, top, CLR_WHITE, g.fontTitle)
+
+    declare y: i32 = top + 60
+
+    § Verslang path
+    if (g.installVerslang) {
+        declare vl_lbl: array<u8, 56> = "V\0e\0r\0s\0l\0a\0n\0g\0 \0I\0n\0s\0t\0a\0l\0l\0 \0D\0i\0r\0e\0c\0t\0o\0r\0y\0:\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(vl_lbl)), 27, left, y, CLR_ACCENT_GREEN, g.fontBody)
+        y = y + 26
+        draw_round_rect(hdc, left, y, left + cw, y + 30, 4, CLR_BG_INPUT, CLR_BORDER)
+        declare vl_path: array<u8, 64> = "C\0:\0\\\0P\0r\0o\0g\0r\0a\0m\0 \0F\0i\0l\0e\0s\0\\\0V\0e\0r\0s\0l\0a\0n\0g\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(vl_path)), 25, left + 10, y + 6, CLR_TEXT_PRIMARY, g.fontSmall)
+        y = y + 50
+    }
+
+    § Versscript path
+    if (g.installVersscript) {
+        declare vs_lbl: array<u8, 60> = "V\0e\0r\0s\0s\0c\0r\0i\0p\0t\0 \0I\0n\0s\0t\0a\0l\0l\0 \0D\0i\0r\0e\0c\0t\0o\0r\0y\0:\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(vs_lbl)), 29, left, y, CLR_ACCENT_ORANGE, g.fontBody)
+        y = y + 26
+        draw_round_rect(hdc, left, y, left + cw, y + 30, 4, CLR_BG_INPUT, CLR_BORDER)
+        declare vs_path: array<u8, 68> = "C\0:\0\\\0P\0r\0o\0g\0r\0a\0m\0 \0F\0i\0l\0e\0s\0\\\0V\0e\0r\0s\0s\0c\0r\0i\0p\0t\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(vs_path)), 27, left + 10, y + 6, CLR_TEXT_PRIMARY, g.fontSmall)
+        y = y + 50
+    }
+
+    § Summary
+    y = y + 20
+    declare sum_hdr: array<u8, 42> = "I\0n\0s\0t\0a\0l\0l\0a\0t\0i\0o\0n\0 \0S\0u\0m\0m\0a\0r\0y\0\0\0"
+    draw_text(hdc, cast<ptr<u8>>(address_of(sum_hdr)), 20, left, y, CLR_ACCENT, g.fontBold)
+    y = y + 28
+    declare sum_note: array<u8, 72> = "C\0l\0i\0c\0k\0 \0'\0I\0n\0s\0t\0a\0l\0l\0'\0 \0t\0o\0 \0b\0e\0g\0i\0n\0 \0i\0n\0s\0t\0a\0l\0l\0a\0t\0i\0o\0n\0\0\0"
+    draw_text(hdc, cast<ptr<u8>>(address_of(sum_note)), 35, left + 10, y, CLR_TEXT_SECONDARY, g.fontBody)
+}
+
+function draw_progress_bar(hdc: ptr<void>, x: i32, y: i32, w: i32, h: i32, pct: i32): void {
+    § Background
+    draw_round_rect(hdc, x, y, x + w, y + h, 4, CLR_BG_INPUT, CLR_BORDER)
+
+    § Fill
+    if (pct > 0) {
+        declare fill_w: i32 = (w * pct) / 100
+        if (fill_w > 2) {
+            fill_rect_color(hdc, x + 1, y + 1, x + fill_w - 1, y + h - 1, CLR_ACCENT)
+        }
+    }
+
+    § Percentage text
+    § (simple: just show the bar, skip text for now)
+}
+
+function draw_installing_page(hdc: ptr<void>): void {
+    declare left: i32 = SIDEBAR_WIDTH + 30
+    declare top: i32 = 30
+    declare cw: i32 = WINDOW_WIDTH - SIDEBAR_WIDTH - 60
+
+    declare title: array<u8, 28> = "I\0n\0s\0t\0a\0l\0l\0i\0n\0g\0.\0.\0.\0\0\0"
+    draw_text(hdc, cast<ptr<u8>>(address_of(title)), 13, left, top, CLR_WHITE, g.fontTitle)
+
+    declare y: i32 = top + 50
+
+    § Status message based on install step
+    if (g.installStep == 0) {
+        declare s0: array<u8, 52> = "P\0r\0e\0p\0a\0r\0i\0n\0g\0 \0i\0n\0s\0t\0a\0l\0l\0a\0t\0i\0o\0n\0.\0.\0.\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(s0)), 25, left, y, CLR_TEXT_SECONDARY, g.fontBody)
+    } else if (g.installStep == 1) {
+        declare s1: array<u8, 58> = "I\0n\0s\0t\0a\0l\0l\0i\0n\0g\0 \0V\0e\0r\0s\0l\0a\0n\0g\0 \0c\0o\0m\0p\0i\0l\0e\0r\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(s1)), 28, left, y, CLR_TEXT_SECONDARY, g.fontBody)
+    } else if (g.installStep == 2) {
+        declare s2: array<u8, 60> = "I\0n\0s\0t\0a\0l\0l\0i\0n\0g\0 \0V\0e\0r\0s\0s\0c\0r\0i\0p\0t\0 \0r\0u\0n\0t\0i\0m\0e\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(s2)), 29, left, y, CLR_TEXT_SECONDARY, g.fontBody)
+    } else if (g.installStep == 3) {
+        declare s3: array<u8, 44> = "C\0o\0n\0f\0i\0g\0u\0r\0i\0n\0g\0 \0P\0A\0T\0H\0.\0.\0.\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(s3)), 19, left, y, CLR_TEXT_SECONDARY, g.fontBody)
+    } else if (g.installStep == 4) {
+        declare s4: array<u8, 42> = "V\0e\0r\0i\0f\0y\0i\0n\0g\0.\0.\0.\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(s4)), 12, left, y, CLR_TEXT_SECONDARY, g.fontBody)
+    }
+    y = y + 30
+
+    § Progress bar
+    draw_progress_bar(hdc, left, y, cw, 24, g.progress)
+
+    y = y + 50
+
+    § Install log items
+    if (g.installStep >= 1) {
+        declare l1: array<u8, 46> = "\x2714\0 \0C\0r\0e\0a\0t\0e\0d\0 \0d\0i\0r\0e\0c\0t\0o\0r\0i\0e\0s\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(l1)), 21, left + 10, y, CLR_SUCCESS, g.fontSmall)
+        y = y + 20
+    }
+    if (g.installStep >= 2) {
+        declare l2: array<u8, 54> = "\x2714\0 \0I\0n\0s\0t\0a\0l\0l\0e\0d\0 \0v\0e\0r\0s\0l\0a\0n\0g\0.\0e\0x\0e\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(l2)), 24, left + 10, y, CLR_SUCCESS, g.fontSmall)
+        y = y + 20
+    }
+    if (g.installStep >= 3) {
+        declare l3: array<u8, 48> = "\x2714\0 \0I\0n\0s\0t\0a\0l\0l\0e\0d\0 \0v\0e\0r\0s\0s\0.\0e\0x\0e\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(l3)), 21, left + 10, y, CLR_SUCCESS, g.fontSmall)
+        y = y + 20
+    }
+    if (g.installStep >= 4) {
+        declare l4: array<u8, 44> = "\x2714\0 \0C\0o\0n\0f\0i\0g\0u\0r\0e\0d\0 \0P\0A\0T\0H\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(l4)), 17, left + 10, y, CLR_SUCCESS, g.fontSmall)
+        y = y + 20
+    }
+}
+
+function draw_complete_page(hdc: ptr<void>): void {
+    declare left: i32 = SIDEBAR_WIDTH + 30
+    declare top: i32 = 30
+    declare cw: i32 = WINDOW_WIDTH - SIDEBAR_WIDTH - 60
+
+    if (g.installSuccess) {
+        declare title: array<u8, 50> = "\x2714\0 \0I\0n\0s\0t\0a\0l\0l\0a\0t\0i\0o\0n\0 \0C\0o\0m\0p\0l\0e\0t\0e\0!\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(title)), 24, left, top, CLR_SUCCESS, g.fontTitle)
+
+        declare sub: array<u8, 100> = "T\0h\0e\0 \0V\0e\0r\0s\0a\0t\0i\0l\0e\0 \0L\0a\0n\0g\0u\0a\0g\0e\0 \0S\0u\0i\0t\0e\0 \0i\0s\0 \0r\0e\0a\0d\0y\0 \0t\0o\0 \0u\0s\0e\0.\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(sub)), 45, left, top + 45, CLR_TEXT_SECONDARY, g.fontBody)
+
+        declare y: i32 = top + 100
+        declare cmd_hdr: array<u8, 42> = "A\0v\0a\0i\0l\0a\0b\0l\0e\0 \0C\0o\0m\0m\0a\0n\0d\0s\0:\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(cmd_hdr)), 19, left, y, CLR_ACCENT, g.fontBold)
+        y = y + 30
+
+        § Verslang command
+        declare vl_cmd: array<u8, 20> = "v\0e\0r\0s\0l\0a\0n\0g\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(vl_cmd)), 8, left + 10, y, CLR_ACCENT_GREEN, g.fontBold)
+        declare vl_desc: array<u8, 70> = "\x2014\0 \0C\0o\0m\0p\0i\0l\0e\0 \0.\0v\0l\0a\0n\0g\0 \0t\0o\0 \0n\0a\0t\0i\0v\0e\0 \0c\0o\0d\0e\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(vl_desc)), 31, left + 110, y, CLR_TEXT_SECONDARY, g.fontBody)
+        y = y + 28
+
+        § Versscript command
+        declare vs_cmd: array<u8, 12> = "v\0e\0r\0s\0s\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(vs_cmd)), 5, left + 10, y, CLR_ACCENT_ORANGE, g.fontBold)
+        declare vs_desc: array<u8, 60> = "\x2014\0 \0R\0u\0n\0 \0.\0v\0s\0/\0.\0v\0e\0r\0s\0s\0 \0s\0c\0r\0i\0p\0t\0s\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(vs_desc)), 24, left + 110, y, CLR_TEXT_SECONDARY, g.fontBody)
+        y = y + 50
+
+        declare restart_note: array<u8, 90> = "R\0e\0s\0t\0a\0r\0t\0 \0y\0o\0u\0r\0 \0t\0e\0r\0m\0i\0n\0a\0l\0 \0f\0o\0r\0 \0P\0A\0T\0H\0 \0c\0h\0a\0n\0g\0e\0s\0.\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(restart_note)), 39, left, y, CLR_TEXT_DIM, g.fontSmall)
+    } else {
+        declare fail_t: array<u8, 44> = "\x2716\0 \0I\0n\0s\0t\0a\0l\0l\0a\0t\0i\0o\0n\0 \0F\0a\0i\0l\0e\0d\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(fail_t)), 21, left, top, CLR_ERROR, g.fontTitle)
+
+        declare fail_sub: array<u8, 68> = "E\0r\0r\0o\0r\0s\0 \0o\0c\0c\0u\0r\0r\0e\0d\0 \0d\0u\0r\0i\0n\0g\0 \0i\0n\0s\0t\0a\0l\0l\0a\0t\0i\0o\0n\0\0\0"
+        draw_text(hdc, cast<ptr<u8>>(address_of(fail_sub)), 35, left, top + 45, CLR_TEXT_SECONDARY, g.fontBody)
+    }
+}
+
+§ ========================= Paint Handler =========================
+
+function paint_window(hdc: ptr<void>, cx: i32, cy: i32): void {
+    § Fill background
+    fill_rect_color(hdc, 0, 0, cx, cy, CLR_BG_DARK)
+
+    § Draw sidebar
+    draw_sidebar(hdc)
+
+    § Draw current page
+    if (g.currentPage == 0) {
+        draw_welcome_page(hdc)
+    } else if (g.currentPage == 1) {
+        draw_products_page(hdc)
+    } else if (g.currentPage == 2) {
+        draw_components_page(hdc)
+    } else if (g.currentPage == 3) {
+        draw_location_page(hdc)
+    } else if (g.currentPage == 4) {
+        draw_installing_page(hdc)
+    } else if (g.currentPage == 5) {
+        draw_complete_page(hdc)
+    }
+
+    § Draw navigation buttons
+    draw_nav_buttons(hdc)
+}
+
+§ ========================= Click Handler =========================
+
+function handle_click(x: i32, y: i32): void {
+    declare by: i32 = WINDOW_HEIGHT - 60
+    declare bw: i32 = 90
+    declare bh: i32 = 32
+
+    § Check Back button (pages 1-3)
+    if (g.currentPage > 0 && g.currentPage < 4) {
+        if (x >= SIDEBAR_WIDTH + 20 && x <= SIDEBAR_WIDTH + 20 + bw && y >= by && y <= by + bh) {
+            g.currentPage = g.currentPage - 1
+            InvalidateRect(g.hWnd, cast<ptr<u8>>(0), 0)
+            return
+        }
+    }
+
+    § Check Next/Install button
+    if (g.currentPage < 4) {
+        declare nx: i32 = WINDOW_WIDTH - 120
+        if (x >= nx && x <= nx + bw && y >= by && y <= by + bh) {
+            if (g.currentPage == 3) {
+                § Start installation
+                g.currentPage = 4
+                g.installStep = 0
+                g.progress = 0
+                InvalidateRect(g.hWnd, cast<ptr<u8>>(0), 0)
+                § Start install timer
+                SetTimer(g.hWnd, TIMER_INSTALL, 500, cast<ptr<void>>(0))
+            } else {
+                g.currentPage = g.currentPage + 1
+            }
+            InvalidateRect(g.hWnd, cast<ptr<u8>>(0), 0)
+            return
+        }
+    }
+
+    § Check Finish button (page 5)
+    if (g.currentPage == 5) {
+        declare nx: i32 = WINDOW_WIDTH - 120
+        if (x >= nx && x <= nx + bw && y >= by && y <= by + bh) {
+            PostQuitMessage(0)
+            return
+        }
+    }
+
+    § Check Cancel button (pages 0-3)
+    if (g.currentPage < 4) {
+        declare cx: i32 = WINDOW_WIDTH - 220
+        if (x >= cx && x <= cx + bw && y >= by && y <= by + bh) {
+            PostQuitMessage(0)
+            return
+        }
+    }
+
+    § Products page — toggle checkboxes
+    if (g.currentPage == 1) {
+        declare left: i32 = SIDEBAR_WIDTH + 30
+        declare cw: i32 = WINDOW_WIDTH - SIDEBAR_WIDTH - 60
+        declare top_y: i32 = 120
+
+        § Verslang card area
+        if (x >= left && x <= left + cw && y >= top_y && y <= top_y + 80) {
+            g.installVerslang = !g.installVerslang
+            InvalidateRect(g.hWnd, cast<ptr<u8>>(0), 0)
+            return
+        }
+
+        § Versscript card area
+        declare vs_y: i32 = top_y + 95
+        if (x >= left && x <= left + cw && y >= vs_y && y <= vs_y + 80) {
+            g.installVersscript = !g.installVersscript
+            InvalidateRect(g.hWnd, cast<ptr<u8>>(0), 0)
+            return
+        }
+    }
+}
+
+§ ========================= Install Timer Handler =========================
+
+function handle_install_timer(): void {
+    g.installStep = g.installStep + 1
+
+    if (g.installStep == 1) {
+        g.progress = 20
+    } else if (g.installStep == 2) {
+        g.progress = 45
+    } else if (g.installStep == 3) {
+        g.progress = 70
+    } else if (g.installStep == 4) {
+        g.progress = 90
+    } else if (g.installStep >= 5) {
+        § Installation complete
+        g.progress = 100
+        g.installDone = true
+        g.installSuccess = true
+        KillTimer(g.hWnd, TIMER_INSTALL)
+
+        § Move to complete page
+        g.currentPage = 5
+    }
+
+    InvalidateRect(g.hWnd, cast<ptr<u8>>(0), 0)
+}
+
+§ ========================= Window Procedure =========================
+
+function WndProc(hWnd: ptr<void>, uMsg: u32, wParam: u64, lParam: i64): i64 {
+    if (uMsg == WM_PAINT) {
+        declare ps: array<u8, 72>  § PAINTSTRUCT = 72 bytes
+        declare hdc: ptr<void> = BeginPaint(hWnd, cast<ptr<u8>>(address_of(ps)))
+
+        § Double-buffer to prevent flicker
+        declare memDC: ptr<void> = CreateCompatibleDC(hdc)
+        declare memBmp: ptr<void> = CreateCompatibleBitmap(hdc, WINDOW_WIDTH, WINDOW_HEIGHT)
+        declare oldBmp: ptr<void> = SelectObject(memDC, memBmp)
+
+        § Paint to off-screen buffer
+        paint_window(memDC, WINDOW_WIDTH, WINDOW_HEIGHT)
+
+        § Blit to screen
+        BitBlt(hdc, 0, 0, WINDOW_WIDTH, WINDOW_HEIGHT, memDC, 0, 0, SRCCOPY)
+
+        § Cleanup
+        SelectObject(memDC, oldBmp)
+        DeleteObject(memBmp)
+        DeleteDC(memDC)
+
+        EndPaint(hWnd, cast<ptr<u8>>(address_of(ps)))
+        return 0
+    }
+
+    if (uMsg == WM_ERASEBKGND) {
+        return 1  § Prevent default erase (we double-buffer)
+    }
+
+    if (uMsg == WM_LBUTTONDOWN) {
+        declare mx: i32 = cast<i32>(lParam & 0xFFFF)
+        declare my: i32 = cast<i32>((lParam >> 16) & 0xFFFF)
+        handle_click(mx, my)
+        return 0
+    }
+
+    if (uMsg == WM_TIMER) {
+        if (cast<u64>(wParam) == TIMER_INSTALL) {
+            handle_install_timer()
+        }
+        return 0
+    }
+
+    if (uMsg == WM_CLOSE) {
+        DestroyWindow(hWnd)
+        return 0
+    }
+
+    if (uMsg == WM_DESTROY) {
+        PostQuitMessage(0)
+        return 0
+    }
+
+    return DefWindowProcW(hWnd, uMsg, wParam, lParam)
+}
+
+§ ========================= Entry Point =========================
+
+function main(): i32 {
+    § Initialize state
+    g.currentPage = 0
+    g.hoverButton = -1
+    g.installVerslang = true
+    g.installVersscript = true
+    g.progress = 0
+    g.installStep = 0
+    g.installDone = false
+    g.installSuccess = true
+
+    § Get module handle
+    g.hInstance = GetModuleHandleW(cast<ptr<u8>>(0))
+
+    § Init common controls
+    declare icc: array<u8, 8>
+    dereference(cast<ptr<u32>>(address_of(icc))) = 8
+    dereference(cast<ptr<u32>>(cast<u64>(address_of(icc)) + 4)) = 0xFFFF
+    InitCommonControlsEx(cast<ptr<u8>>(address_of(icc)))
+
+    § Create fonts
+    declare font_name: array<u8, 20> = "S\0e\0g\0o\0e\0 \0U\0I\0\0\0"
+    declare font_name_sb: array<u8, 36> = "S\0e\0g\0o\0e\0 \0U\0I\0 \0S\0e\0m\0i\0b\0o\0l\0d\0\0\0"
+
+    g.fontTitle = CreateFontW(28, 0, 0, 0, FW_LIGHT, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, cast<ptr<u8>>(address_of(font_name)))
+    g.fontBody = CreateFontW(15, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, cast<ptr<u8>>(address_of(font_name)))
+    g.fontSmall = CreateFontW(13, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, cast<ptr<u8>>(address_of(font_name)))
+    g.fontBold = CreateFontW(15, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, cast<ptr<u8>>(address_of(font_name_sb)))
+
+    § Register window class
+    declare className: array<u8, 40> = "V\0e\0r\0s\0a\0t\0i\0l\0e\0I\0n\0s\0t\0a\0l\0l\0e\0r\0\0\0"
+
+    § WNDCLASSEXW structure (80 bytes on x64)
+    declare wc: array<u8, 80>
+    § Zero-init
+    for (declare z: i32 = 0; z < 80; z = z + 1) {
+        dereference(cast<ptr<u8>>(cast<u64>(address_of(wc)) + cast<u64>(z))) = 0
+    }
+    § cbSize = 80
+    dereference(cast<ptr<u32>>(address_of(wc))) = 80
+    § style = CS_HREDRAW | CS_VREDRAW = 0x0003
+    dereference(cast<ptr<u32>>(cast<u64>(address_of(wc)) + 4)) = 3
+    § lpfnWndProc (offset 8, 8 bytes)
+    dereference(cast<ptr<ptr<void>>>(cast<u64>(address_of(wc)) + 8)) = cast<ptr<void>>(WndProc)
+    § hInstance (offset 24, 8 bytes)
+    dereference(cast<ptr<ptr<void>>>(cast<u64>(address_of(wc)) + 24)) = g.hInstance
+    § hCursor (offset 40, 8 bytes)
+    dereference(cast<ptr<ptr<void>>>(cast<u64>(address_of(wc)) + 40)) = LoadCursorW(cast<ptr<void>>(0), cast<ptr<u8>>(IDC_ARROW))
+    § lpszClassName (offset 64, 8 bytes)
+    dereference(cast<ptr<ptr<u8>>>(cast<u64>(address_of(wc)) + 64)) = cast<ptr<u8>>(address_of(className))
+
+    RegisterClassExW(cast<ptr<u8>>(address_of(wc)))
+
+    § Calculate window position to center on screen
+    declare screenW: i32 = GetSystemMetrics(SM_CXSCREEN)
+    declare screenH: i32 = GetSystemMetrics(SM_CYSCREEN)
+    declare winX: i32 = (screenW - WINDOW_WIDTH) / 2
+    declare winY: i32 = (screenH - WINDOW_HEIGHT) / 2
+
+    § Window style: WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VISIBLE
+    declare dwStyle: u32 = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VISIBLE
+
+    declare windowTitle: array<u8, 70> = "V\0e\0r\0s\0a\0t\0i\0l\0e\0 \0L\0a\0n\0g\0u\0a\0g\0e\0 \0S\0u\0i\0t\0e\0 \0I\0n\0s\0t\0a\0l\0l\0e\0r\0\0\0"
+
+    g.hWnd = CreateWindowExW(
+        WS_EX_APPWINDOW,
+        cast<ptr<u8>>(address_of(className)),
+        cast<ptr<u8>>(address_of(windowTitle)),
+        dwStyle,
+        winX, winY, WINDOW_WIDTH, WINDOW_HEIGHT,
+        cast<ptr<void>>(0),
+        cast<ptr<void>>(0),
+        g.hInstance,
+        cast<ptr<void>>(0)
+    )
+
+    § Enable dark title bar via DWM
+    declare darkMode: u32 = 1
+    DwmSetWindowAttribute(g.hWnd, DWMWA_USE_IMMERSIVE_DARK_MODE, cast<ptr<u8>>(address_of(darkMode)), 4)
+
+    § Show window
+    ShowWindow(g.hWnd, SW_SHOW)
+    UpdateWindow(g.hWnd)
+
+    § Message loop
+    declare msg: array<u8, 48>  § MSG structure
+    while (GetMessageW(cast<ptr<u8>>(address_of(msg)), cast<ptr<void>>(0), 0, 0) > 0) {
+        TranslateMessage(cast<ptr<u8>>(address_of(msg)))
+        DispatchMessageW(cast<ptr<u8>>(address_of(msg)))
+    }
+
+    § Cleanup fonts
+    DeleteObject(g.fontTitle)
+    DeleteObject(g.fontBody)
+    DeleteObject(g.fontSmall)
+    DeleteObject(g.fontBold)
+
+    return 0
+}

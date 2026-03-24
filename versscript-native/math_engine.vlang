@@ -1,0 +1,445 @@
+§ ============================================================================
+§ Versscript Native Module: High-Performance Math Engine
+§ Written in Verslang with SIMD/Assembly for use by Versscript runtime
+§ Compile: verslang math_engine.vlang -o math_engine.o -f obj
+§ ============================================================================
+
+§ --- Constants ---
+
+constant PI: f64 = 3.14159265358979323846
+constant E: f64 = 2.71828182845904523536
+constant TAU: f64 = 6.28318530717958647692
+constant SQRT2: f64 = 1.41421356237309504880
+constant LN2: f64 = 0.69314718055994530942
+constant LN10: f64 = 2.30258509299404568402
+constant EPSILON: f64 = 0.00000000000000022204
+
+§ --- Basic Math ---
+
+function native_abs_f64(x: f64): f64 {
+    § Use SSE to clear sign bit
+    declare result: f64 = 0.0
+    assembly {
+        movsd xmm0, [rbp - 8]
+        ; AND with mask that clears sign bit
+        mov rax, 0x7FFFFFFFFFFFFFFF
+        movq xmm1, rax
+        andpd xmm0, xmm1
+        movsd [rbp - 16], xmm0
+    }
+    return result
+}
+
+function native_abs_i64(x: i64): i64 {
+    § Branchless absolute value
+    declare result: i64 = 0
+    assembly {
+        mov rax, [rbp - 8]
+        mov rdx, rax
+        sar rdx, 63          ; rdx = sign mask (0 or -1)
+        xor rax, rdx         ; conditional negate step 1
+        sub rax, rdx         ; conditional negate step 2
+        mov [rbp - 16], rax
+    }
+    return result
+}
+
+function native_min_f64(a: f64, b: f64): f64 {
+    declare result: f64 = 0.0
+    assembly {
+        movsd xmm0, [rbp - 8]
+        minsd xmm0, [rbp - 16]
+        movsd [rbp - 24], xmm0
+    }
+    return result
+}
+
+function native_max_f64(a: f64, b: f64): f64 {
+    declare result: f64 = 0.0
+    assembly {
+        movsd xmm0, [rbp - 8]
+        maxsd xmm0, [rbp - 16]
+        movsd [rbp - 24], xmm0
+    }
+    return result
+}
+
+function native_clamp_f64(val: f64, lo: f64, hi: f64): f64 {
+    declare result: f64 = 0.0
+    assembly {
+        movsd xmm0, [rbp - 8]    ; val
+        maxsd xmm0, [rbp - 16]   ; max(val, lo)
+        minsd xmm0, [rbp - 24]   ; min(result, hi)
+        movsd [rbp - 32], xmm0
+    }
+    return result
+}
+
+§ --- Floor / Ceil / Round ---
+
+function native_floor(x: f64): f64 {
+    declare result: f64 = 0.0
+    assembly {
+        movsd xmm0, [rbp - 8]
+        roundsd xmm0, xmm0, 1    ; round toward -inf
+        movsd [rbp - 16], xmm0
+    }
+    return result
+}
+
+function native_ceil(x: f64): f64 {
+    declare result: f64 = 0.0
+    assembly {
+        movsd xmm0, [rbp - 8]
+        roundsd xmm0, xmm0, 2    ; round toward +inf
+        movsd [rbp - 16], xmm0
+    }
+    return result
+}
+
+function native_round(x: f64): f64 {
+    declare result: f64 = 0.0
+    assembly {
+        movsd xmm0, [rbp - 8]
+        roundsd xmm0, xmm0, 0    ; round to nearest even
+        movsd [rbp - 16], xmm0
+    }
+    return result
+}
+
+function native_trunc(x: f64): f64 {
+    declare result: f64 = 0.0
+    assembly {
+        movsd xmm0, [rbp - 8]
+        roundsd xmm0, xmm0, 3    ; round toward zero
+        movsd [rbp - 16], xmm0
+    }
+    return result
+}
+
+§ --- Square Root ---
+
+function native_sqrt(x: f64): f64 {
+    declare result: f64 = 0.0
+    assembly {
+        movsd xmm0, [rbp - 8]
+        sqrtsd xmm0, xmm0
+        movsd [rbp - 16], xmm0
+    }
+    return result
+}
+
+function native_rsqrt(x: f64): f64 {
+    § Fast reciprocal square root (1/sqrt(x))
+    § Uses the famous Quake III fast inverse square root approach adapted for f64
+    declare result: f64 = 0.0
+    declare half_x: f64 = x * 0.5
+
+    § Initial approximation via bit manipulation
+    declare i: u64 = bitcast<u64>(x)
+    i = 0x5FE6EB50C7B537A9 - (i >> 1)
+    result = bitcast<f64>(i)
+
+    § Newton-Raphson iterations for precision
+    result = result * (1.5 - half_x * result * result)
+    result = result * (1.5 - half_x * result * result)
+
+    return result
+}
+
+§ --- Power ---
+
+function native_pow_int(base: i64, exp: u32): i64 {
+    § Fast exponentiation by squaring
+    declare result: i64 = 1
+    declare b: i64 = base
+    declare e: u32 = exp
+
+    while (e > 0) {
+        if ((e & 1) != 0) {
+            result = result * b
+        }
+        b = b * b
+        e = e >> 1
+    }
+    return result
+}
+
+function native_pow_f64(base: f64, exp: f64): f64 {
+    § For integer exponents, use fast path
+    § For non-integer, use exp(exp * ln(base))
+
+    § Check if exp is an integer
+    declare int_exp: i64 = cast<i64>(exp)
+    declare diff: f64 = exp - cast<f64>(int_exp)
+
+    if (diff < EPSILON && diff > 0.0 - EPSILON) {
+        § Integer exponent - use fast squaring
+        if (int_exp >= 0) {
+            return cast<f64>(native_pow_int(cast<i64>(base * 1000000.0), cast<u32>(int_exp))) / 1000000.0
+        }
+    }
+
+    § General case: use FPU
+    declare result: f64 = 0.0
+    assembly {
+        ; x87 FPU: base^exp = 2^(exp * log2(base))
+        fld qword [rbp - 8]    ; load base
+        fld qword [rbp - 16]   ; load exp
+        ; exp * log2(base)
+        fxch st1
+        fyl2x                  ; st0 = exp * log2(base)
+        ; 2^(result)
+        fld st0
+        frndint                ; integer part
+        fxch st1
+        fsub st0, st1          ; fractional part
+        f2xm1                  ; 2^frac - 1
+        fld1
+        faddp                  ; 2^frac
+        fscale                 ; 2^int * 2^frac
+        fstp st1
+        fstp qword [rbp - 24]  ; store result
+    }
+    return result
+}
+
+§ --- Trigonometry ---
+
+function native_sin(x: f64): f64 {
+    declare result: f64 = 0.0
+    assembly {
+        fld qword [rbp - 8]
+        fsin
+        fstp qword [rbp - 16]
+    }
+    return result
+}
+
+function native_cos(x: f64): f64 {
+    declare result: f64 = 0.0
+    assembly {
+        fld qword [rbp - 8]
+        fcos
+        fstp qword [rbp - 16]
+    }
+    return result
+}
+
+function native_tan(x: f64): f64 {
+    declare result: f64 = 0.0
+    assembly {
+        fld qword [rbp - 8]
+        fptan
+        fstp st0               ; pop the 1.0 that fptan pushes
+        fstp qword [rbp - 16]
+    }
+    return result
+}
+
+function native_atan2(y: f64, x: f64): f64 {
+    declare result: f64 = 0.0
+    assembly {
+        fld qword [rbp - 16]   ; x
+        fld qword [rbp - 8]    ; y
+        fpatan
+        fstp qword [rbp - 24]
+    }
+    return result
+}
+
+function native_asin(x: f64): f64 {
+    § asin(x) = atan2(x, sqrt(1 - x*x))
+    declare one_minus_xx: f64 = 1.0 - x * x
+    declare sqrt_val: f64 = native_sqrt(one_minus_xx)
+    return native_atan2(x, sqrt_val)
+}
+
+function native_acos(x: f64): f64 {
+    § acos(x) = atan2(sqrt(1 - x*x), x)
+    declare one_minus_xx: f64 = 1.0 - x * x
+    declare sqrt_val: f64 = native_sqrt(one_minus_xx)
+    return native_atan2(sqrt_val, x)
+}
+
+§ --- Logarithms ---
+
+function native_log(x: f64): f64 {
+    § Natural logarithm using FPU
+    declare result: f64 = 0.0
+    assembly {
+        fldln2                 ; push ln(2)
+        fld qword [rbp - 8]   ; push x
+        fyl2x                  ; st0 = ln(2) * log2(x) = ln(x)
+        fstp qword [rbp - 16]
+    }
+    return result
+}
+
+function native_log2(x: f64): f64 {
+    declare result: f64 = 0.0
+    assembly {
+        fld1                   ; push 1.0
+        fld qword [rbp - 8]   ; push x
+        fyl2x                  ; st0 = 1.0 * log2(x) = log2(x)
+        fstp qword [rbp - 16]
+    }
+    return result
+}
+
+function native_log10(x: f64): f64 {
+    declare result: f64 = 0.0
+    assembly {
+        fldlg2                 ; push log10(2)
+        fld qword [rbp - 8]   ; push x
+        fyl2x                  ; st0 = log10(2) * log2(x) = log10(x)
+        fstp qword [rbp - 16]
+    }
+    return result
+}
+
+function native_exp(x: f64): f64 {
+    § e^x using FPU
+    declare result: f64 = 0.0
+    assembly {
+        fldl2e                 ; push log2(e)
+        fld qword [rbp - 8]   ; push x
+        fmulp                  ; st0 = x * log2(e) = log2(e^x)
+        fld st0
+        frndint                ; integer part
+        fxch st1
+        fsub st0, st1          ; fractional part
+        f2xm1
+        fld1
+        faddp                  ; 2^frac
+        fscale                 ; 2^int * 2^frac = e^x
+        fstp st1
+        fstp qword [rbp - 16]
+    }
+    return result
+}
+
+§ --- SIMD Vector Operations (4x f64) ---
+
+structure Vec4d {
+    x: f64,
+    y: f64,
+    z: f64,
+    w: f64
+}
+
+function native_vec4d_add(a: Vec4d, b: Vec4d): Vec4d {
+    declare result: Vec4d
+    assembly {
+        ; Load a (2 doubles at a time with AVX)
+        movupd xmm0, [rbp - 32]   ; a.x, a.y
+        movupd xmm1, [rbp - 16]   ; a.z, a.w
+        ; Load b
+        movupd xmm2, [rbp - 64]   ; b.x, b.y
+        movupd xmm3, [rbp - 48]   ; b.z, b.w
+        ; Add
+        addpd xmm0, xmm2
+        addpd xmm1, xmm3
+        ; Store result
+        movupd [rbp - 96], xmm0
+        movupd [rbp - 80], xmm1
+    }
+    return result
+}
+
+function native_vec4d_dot(a: Vec4d, b: Vec4d): f64 {
+    declare result: f64 = 0.0
+    result = a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w
+    return result
+}
+
+function native_vec4d_length(v: Vec4d): f64 {
+    declare dot: f64 = v.x * v.x + v.y * v.y + v.z * v.z + v.w * v.w
+    return native_sqrt(dot)
+}
+
+§ --- Random Number Generator (PCG) ---
+
+structure PCGState {
+    state: u64,
+    inc: u64
+}
+
+function native_pcg_init(seed: u64, seq: u64): PCGState {
+    declare rng: PCGState
+    rng.state = 0
+    rng.inc = (seq << 1) | 1
+    § Advance once
+    rng.state = rng.state * 6364136223846793005 + rng.inc
+    rng.state = rng.state + seed
+    rng.state = rng.state * 6364136223846793005 + rng.inc
+    return rng
+}
+
+function native_pcg_next(rng: ptr<PCGState>): u32 {
+    declare state: u64 = dereference(rng).state
+    declare inc: u64 = dereference(rng).inc
+
+    § Advance state
+    declare new_state: u64 = state * 6364136223846793005 + inc
+
+    § Calculate output
+    declare xorshifted: u32 = cast<u32>(((state >> 18) ^ state) >> 27)
+    declare rot: u32 = cast<u32>(state >> 59)
+    declare result: u32 = (xorshifted >> rot) | (xorshifted << ((0 - rot) & 31))
+
+    § Update state in-place would need mutable pointer support
+    return result
+}
+
+function native_pcg_float(rng: ptr<PCGState>): f64 {
+    § Generate random f64 in [0, 1)
+    declare bits: u32 = native_pcg_next(rng)
+    return cast<f64>(bits) / 4294967296.0
+}
+
+§ --- Integer Math ---
+
+function native_gcd(a: u64, b: u64): u64 {
+    while (b != 0) {
+        declare t: u64 = b
+        b = a - (a / b) * b
+        a = t
+    }
+    return a
+}
+
+function native_lcm(a: u64, b: u64): u64 {
+    if (a == 0 || b == 0) { return 0 }
+    return (a / native_gcd(a, b)) * b
+}
+
+function native_popcount(x: u64): u32 {
+    declare result: u32 = 0
+    assembly {
+        popcnt rax, [rbp - 8]
+        mov [rbp - 12], eax
+    }
+    return result
+}
+
+function native_clz(x: u64): u32 {
+    § Count leading zeros
+    declare result: u32 = 0
+    assembly {
+        bsr rax, [rbp - 8]
+        xor rax, 63           ; convert from bit index to leading zero count
+        mov [rbp - 12], eax
+    }
+    return result
+}
+
+function native_ctz(x: u64): u32 {
+    § Count trailing zeros
+    declare result: u32 = 0
+    assembly {
+        bsf rax, [rbp - 8]
+        mov [rbp - 12], eax
+    }
+    return result
+}

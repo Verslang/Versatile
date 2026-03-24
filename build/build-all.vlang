@@ -1,0 +1,292 @@
+§ ============================================================================
+§ Verslang Build System: Master Build Orchestrator
+§ Written in Verslang - compiles all project components
+§ Compile: verslang build-all.vlang -o build-all
+§ ============================================================================
+
+§ --- Build Targets ---
+
+enumeration BuildTarget {
+    Bootstrap = 0,
+    NativeModules = 1,
+    Installer = 2,
+    VersatileInstaller = 3,
+    Tests = 4,
+    All = 5
+}
+
+enumeration BuildPlatform {
+    Windows = 0,
+    Linux = 1,
+    MacOS = 2
+}
+
+structure BuildConfig {
+    target: BuildTarget,
+    platform: BuildPlatform,
+    optimize: bool,
+    verbose: bool,
+    clean: bool,
+    output_dir: ptr<u8>
+}
+
+§ --- Platform Detection ---
+
+function detect_platform(): BuildPlatform {
+    when platform == "windows" {
+        return BuildPlatform::Windows
+    }
+    when platform == "linux" {
+        return BuildPlatform::Linux
+    }
+    when platform == "macos" {
+        return BuildPlatform::MacOS
+    }
+}
+
+§ --- Platform I/O ---
+
+when platform == "linux" {
+    function build_write(fd: i32, buf: ptr<u8>, len: u64): void {
+        assembly {
+            "mov rax, 1"
+            "mov edi, %[fd]"
+            "mov rsi, %[buf]"
+            "mov rdx, %[len]"
+            "syscall"
+        }
+    }
+
+    function build_exit(code: i32): void {
+        assembly {
+            "mov rax, 60"
+            "mov edi, %[code]"
+            "syscall"
+        }
+    }
+}
+
+when platform == "windows" {
+    external function GetStdHandle(n: i32): u64
+    external function WriteConsoleA(h: u64, buf: ptr<u8>, cnt: u32, written: ptr<u32>, reserved: ptr<u8>): bool
+    external function ExitProcess(code: u32): void
+
+    function build_write(fd: i32, buf: ptr<u8>, len: u64): void {
+        declare handle: u64 = GetStdHandle(-11)
+        declare written: u32 = 0
+        WriteConsoleA(handle, buf, cast<u32>(len), address_of(written), cast<ptr<u8>>(0))
+    }
+
+    function build_exit(code: i32): void {
+        ExitProcess(cast<u32>(code))
+    }
+}
+
+§ --- Print Helpers ---
+
+function build_str_len(s: ptr<u8>): u64 {
+    declare len: u64 = 0
+    while (dereference(cast<ptr<u8>>(cast<u64>(s) + len)) != 0) {
+        len = len + 1
+    }
+    return len
+}
+
+function build_print(msg: ptr<u8>): void {
+    build_write(1, msg, build_str_len(msg))
+}
+
+function build_println(msg: ptr<u8>): void {
+    build_print(msg)
+    declare nl: array<u8, 1> = "\n"
+    build_write(1, cast<ptr<u8>>(address_of(nl)), 1)
+}
+
+§ --- Build Steps ---
+
+structure BuildStep {
+    name: ptr<u8>,
+    source_files: ptr<u8>,
+    output_file: ptr<u8>,
+    format: ptr<u8>
+}
+
+constant MAX_STEPS: u64 = 32
+
+§ --- Build Plan ---
+
+function plan_bootstrap_build(platform: BuildPlatform, optimize: bool): void {
+    build_println(cast<ptr<u8>>("=== Building Verslang Bootstrap Compiler ==="))
+    build_println(cast<ptr<u8>>(""))
+    build_println(cast<ptr<u8>>("Step 1: Compile lexer.vlang"))
+    build_println(cast<ptr<u8>>("  verslang verslang-bootstrap/lexer.vlang -o build/lexer.o -f obj"))
+    build_println(cast<ptr<u8>>(""))
+    build_println(cast<ptr<u8>>("Step 2: Compile parser.vlang"))
+    build_println(cast<ptr<u8>>("  verslang verslang-bootstrap/parser.vlang -o build/parser.o -f obj"))
+    build_println(cast<ptr<u8>>(""))
+    build_println(cast<ptr<u8>>("Step 3: Compile codegen.vlang"))
+    build_println(cast<ptr<u8>>("  verslang verslang-bootstrap/codegen.vlang -o build/codegen.o -f obj"))
+    build_println(cast<ptr<u8>>(""))
+    build_println(cast<ptr<u8>>("Step 4: Compile main.vlang"))
+    build_println(cast<ptr<u8>>("  verslang verslang-bootstrap/main.vlang -o build/main.o -f obj"))
+    build_println(cast<ptr<u8>>(""))
+    build_println(cast<ptr<u8>>("Step 5: Link bootstrap compiler"))
+
+    when platform == "linux" {
+        build_println(cast<ptr<u8>>("  verslang -link build/main.o build/lexer.o build/parser.o build/codegen.o -o build/verslang-bootstrap -f elf64"))
+    }
+    when platform == "windows" {
+        build_println(cast<ptr<u8>>("  verslang -link build/main.o build/lexer.o build/parser.o build/codegen.o -o build/verslang-bootstrap.exe -f pe64"))
+    }
+
+    build_println(cast<ptr<u8>>(""))
+}
+
+function plan_native_modules_build(platform: BuildPlatform): void {
+    build_println(cast<ptr<u8>>("=== Building Versscript Native Modules ==="))
+    build_println(cast<ptr<u8>>(""))
+    build_println(cast<ptr<u8>>("Step 1: Compile string_ops.vlang"))
+    build_println(cast<ptr<u8>>("  verslang versscript-native/string_ops.vlang -o build/string_ops.o -f obj"))
+    build_println(cast<ptr<u8>>(""))
+    build_println(cast<ptr<u8>>("Step 2: Compile math_engine.vlang"))
+    build_println(cast<ptr<u8>>("  verslang versscript-native/math_engine.vlang -o build/math_engine.o -f obj"))
+    build_println(cast<ptr<u8>>(""))
+    build_println(cast<ptr<u8>>("Step 3: Compile memory_pool.vlang"))
+    build_println(cast<ptr<u8>>("  verslang versscript-native/memory_pool.vlang -o build/memory_pool.o -f obj"))
+    build_println(cast<ptr<u8>>(""))
+    build_println(cast<ptr<u8>>("Step 4: Compile json_parser.vlang"))
+    build_println(cast<ptr<u8>>("  verslang versscript-native/json_parser.vlang -o build/json_parser.o -f obj"))
+    build_println(cast<ptr<u8>>(""))
+    build_println(cast<ptr<u8>>("Step 5: Compile hash_table.vlang"))
+    build_println(cast<ptr<u8>>("  verslang versscript-native/hash_table.vlang -o build/hash_table.o -f obj"))
+    build_println(cast<ptr<u8>>(""))
+
+    when platform == "linux" {
+        build_println(cast<ptr<u8>>("Step 6: Create shared library"))
+        build_println(cast<ptr<u8>>("  verslang -link -shared build/string_ops.o build/math_engine.o build/memory_pool.o build/json_parser.o build/hash_table.o -o build/libversnative.so"))
+    }
+    when platform == "windows" {
+        build_println(cast<ptr<u8>>("Step 6: Create DLL"))
+        build_println(cast<ptr<u8>>("  verslang -link -shared build/string_ops.o build/math_engine.o build/memory_pool.o build/json_parser.o build/hash_table.o -o build/versnative.dll"))
+    }
+
+    build_println(cast<ptr<u8>>(""))
+}
+
+function plan_installer_build(platform: BuildPlatform): void {
+    build_println(cast<ptr<u8>>("=== Building Verslang Installers ==="))
+    build_println(cast<ptr<u8>>(""))
+    build_println(cast<ptr<u8>>("Step 1: Compile installer-common.vlang"))
+    build_println(cast<ptr<u8>>("  verslang installer/verslang-installer/installer-common.vlang -o build/installer-common.o -f obj"))
+    build_println(cast<ptr<u8>>(""))
+
+    when platform == "windows" {
+        build_println(cast<ptr<u8>>("Step 2: Compile Windows installer"))
+        build_println(cast<ptr<u8>>("  verslang installer/verslang-installer/installer-windows.vlang -o build/installer-win.o -f obj"))
+        build_println(cast<ptr<u8>>(""))
+        build_println(cast<ptr<u8>>("Step 3: Link installer"))
+        build_println(cast<ptr<u8>>("  verslang -link build/installer-common.o build/installer-win.o -o build/verslang-installer.exe -f pe64"))
+    }
+    when platform == "linux" {
+        build_println(cast<ptr<u8>>("Step 2: Compile Linux installer"))
+        build_println(cast<ptr<u8>>("  verslang installer/verslang-installer/installer-linux.vlang -o build/installer-linux.o -f obj"))
+        build_println(cast<ptr<u8>>(""))
+        build_println(cast<ptr<u8>>("Step 3: Link installer"))
+        build_println(cast<ptr<u8>>("  verslang -link build/installer-common.o build/installer-linux.o -o build/verslang-installer -f elf64"))
+    }
+    when platform == "macos" {
+        build_println(cast<ptr<u8>>("Step 2: Compile macOS installer"))
+        build_println(cast<ptr<u8>>("  verslang installer/verslang-installer/installer-macos.vlang -o build/installer-macos.o -f obj"))
+        build_println(cast<ptr<u8>>(""))
+        build_println(cast<ptr<u8>>("Step 3: Link installer"))
+        build_println(cast<ptr<u8>>("  verslang -link build/installer-common.o build/installer-macos.o -o build/verslang-installer -f macho"))
+    }
+
+    build_println(cast<ptr<u8>>(""))
+}
+
+function plan_versatile_installer_build(platform: BuildPlatform): void {
+    build_println(cast<ptr<u8>>("=== Building Versatile Installer ==="))
+    build_println(cast<ptr<u8>>(""))
+    build_println(cast<ptr<u8>>("Step 1: Compile versatile installer"))
+    build_println(cast<ptr<u8>>("  verslang installer/versatile-installer/installer.vlang -o build/installer.o -f obj"))
+    build_println(cast<ptr<u8>>(""))
+
+    when platform == "windows" {
+        build_println(cast<ptr<u8>>("Step 2: Link"))
+        build_println(cast<ptr<u8>>("  verslang -link build/installer-common.o build/installer.o -o build/versatile-installer.exe -f pe64"))
+    }
+    when platform == "linux" {
+        build_println(cast<ptr<u8>>("Step 2: Link"))
+        build_println(cast<ptr<u8>>("  verslang -link build/installer-common.o build/installer.o -o build/versatile-installer -f elf64"))
+    }
+
+    build_println(cast<ptr<u8>>(""))
+}
+
+function plan_tests_build(platform: BuildPlatform): void {
+    build_println(cast<ptr<u8>>("=== Building Test Suites ==="))
+    build_println(cast<ptr<u8>>(""))
+    build_println(cast<ptr<u8>>("Step 1: Compile Verslang tests"))
+
+    when platform == "linux" {
+        build_println(cast<ptr<u8>>("  verslang tests/test_verslang.vlang -o build/test_verslang -f elf64"))
+    }
+    when platform == "windows" {
+        build_println(cast<ptr<u8>>("  verslang tests/test_verslang.vlang -o build/test_verslang.exe -f pe64"))
+    }
+
+    build_println(cast<ptr<u8>>(""))
+    build_println(cast<ptr<u8>>("Step 2: Run Versscript tests"))
+    build_println(cast<ptr<u8>>("  verss tests/test_versscript.vs"))
+    build_println(cast<ptr<u8>>(""))
+    build_println(cast<ptr<u8>>("Step 3: Run Versatile tests"))
+    build_println(cast<ptr<u8>>("  versatile tests/test_versatile.vtile"))
+    build_println(cast<ptr<u8>>(""))
+}
+
+§ --- Entry Point ---
+
+function _start(): void {
+    build_println(cast<ptr<u8>>("╔══════════════════════════════════════════════════════════════╗"))
+    build_println(cast<ptr<u8>>("║            Versatile Project - Build Orchestrator            ║"))
+    build_println(cast<ptr<u8>>("║     Verslang + Versscript + Versatile Build System v1.0      ║"))
+    build_println(cast<ptr<u8>>("╚══════════════════════════════════════════════════════════════╝"))
+    build_println(cast<ptr<u8>>(""))
+
+    declare platform: BuildPlatform = detect_platform()
+
+    build_print(cast<ptr<u8>>("Platform: "))
+    when platform == "windows" {
+        build_println(cast<ptr<u8>>("Windows (PE64)"))
+    }
+    when platform == "linux" {
+        build_println(cast<ptr<u8>>("Linux (ELF64)"))
+    }
+    when platform == "macos" {
+        build_println(cast<ptr<u8>>("macOS (Mach-O)"))
+    }
+    build_println(cast<ptr<u8>>(""))
+
+    § Build all targets in order
+    build_println(cast<ptr<u8>>("Build Plan:"))
+    build_println(cast<ptr<u8>>("  1. Bootstrap Compiler"))
+    build_println(cast<ptr<u8>>("  2. Native Modules"))
+    build_println(cast<ptr<u8>>("  3. Verslang Installer"))
+    build_println(cast<ptr<u8>>("  4. Versatile Installer"))
+    build_println(cast<ptr<u8>>("  5. Test Suites"))
+    build_println(cast<ptr<u8>>(""))
+    build_println(cast<ptr<u8>>("────────────────────────────────────────────"))
+    build_println(cast<ptr<u8>>(""))
+
+    plan_bootstrap_build(platform, true)
+    plan_native_modules_build(platform)
+    plan_installer_build(platform)
+    plan_versatile_installer_build(platform)
+    plan_tests_build(platform)
+
+    build_println(cast<ptr<u8>>("════════════════════════════════════════════"))
+    build_println(cast<ptr<u8>>("Build plan complete. Run with --execute to build."))
+
+    build_exit(0)
+}

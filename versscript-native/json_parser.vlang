@@ -1,0 +1,574 @@
+§ ============================================================================
+§ Versscript Native Module: Fast JSON Parser
+§ Written in Verslang for high-performance JSON parsing in Versscript
+§ Compile: verslang json_parser.vlang -o json_parser.o -f obj
+§ ============================================================================
+
+§ --- JSON Token Types ---
+
+enumeration JsonToken {
+    LeftBrace = 0,
+    RightBrace = 1,
+    LeftBracket = 2,
+    RightBracket = 3,
+    Colon = 4,
+    Comma = 5,
+    StringValue = 6,
+    NumberValue = 7,
+    TrueValue = 8,
+    FalseValue = 9,
+    NullValue = 10,
+    EndOfInput = 11,
+    Error = 12
+}
+
+§ --- JSON Value Types ---
+
+enumeration JsonType {
+    Null = 0,
+    Boolean = 1,
+    Number = 2,
+    String = 3,
+    Array = 4,
+    Object = 5
+}
+
+§ --- Structures ---
+
+structure JsonLexer {
+    input: ptr<u8>,
+    length: u64,
+    position: u64,
+    line: u32,
+    column: u32
+}
+
+structure JsonTokenInfo {
+    token_type: JsonToken,
+    start: u64,
+    length: u64,
+    line: u32,
+    column: u32
+}
+
+structure JsonValue {
+    value_type: JsonType,
+    data_start: u64,
+    data_length: u64,
+    § For arrays/objects: count of children
+    child_count: u32,
+    § For numbers: parsed value
+    number_value: f64,
+    § For booleans
+    bool_value: bool
+}
+
+structure JsonParseResult {
+    success: bool,
+    value: JsonValue,
+    error_line: u32,
+    error_column: u32,
+    error_offset: u64,
+    tokens_consumed: u32
+}
+
+§ --- Character Classification ---
+
+function is_whitespace(c: u8): bool {
+    return c == 32 || c == 9 || c == 10 || c == 13
+}
+
+function is_digit(c: u8): bool {
+    return c >= 48 && c <= 57
+}
+
+function is_hex_digit(c: u8): bool {
+    return (c >= 48 && c <= 57) ||
+           (c >= 65 && c <= 70) ||
+           (c >= 97 && c <= 102)
+}
+
+§ --- Lexer Operations ---
+
+function lexer_init(input: ptr<u8>, length: u64): JsonLexer {
+    declare lex: JsonLexer
+    lex.input = input
+    lex.length = length
+    lex.position = 0
+    lex.line = 1
+    lex.column = 1
+    return lex
+}
+
+function lexer_peek(lex: ptr<JsonLexer>): u8 {
+    declare l: JsonLexer = dereference(lex)
+    if (l.position >= l.length) {
+        return 0
+    }
+    return dereference(cast<ptr<u8>>(cast<u64>(l.input) + l.position))
+}
+
+function lexer_advance(lex: ptr<JsonLexer>): u8 {
+    declare l: JsonLexer = dereference(lex)
+    if (l.position >= l.length) {
+        return 0
+    }
+    declare c: u8 = dereference(cast<ptr<u8>>(cast<u64>(l.input) + l.position))
+    dereference(lex).position = l.position + 1
+    if (c == 10) {
+        dereference(lex).line = l.line + 1
+        dereference(lex).column = 1
+    } else {
+        dereference(lex).column = l.column + 1
+    }
+    return c
+}
+
+function lexer_skip_whitespace(lex: ptr<JsonLexer>): void {
+    while (dereference(lex).position < dereference(lex).length) {
+        declare c: u8 = lexer_peek(lex)
+        if (!is_whitespace(c)) {
+            break
+        }
+        lexer_advance(lex)
+    }
+}
+
+§ --- Token Scanning ---
+
+function scan_string(lex: ptr<JsonLexer>): JsonTokenInfo {
+    declare tok: JsonTokenInfo
+    tok.token_type = JsonToken::StringValue
+    tok.line = dereference(lex).line
+    tok.column = dereference(lex).column
+
+    § Skip opening quote
+    lexer_advance(lex)
+    tok.start = dereference(lex).position
+
+    declare escaped: bool = false
+    loop {
+        declare c: u8 = lexer_advance(lex)
+        if (c == 0) {
+            tok.token_type = JsonToken::Error
+            break
+        }
+        if (escaped) {
+            escaped = false
+            continue
+        }
+        if (c == 92) {  § backslash
+            escaped = true
+            continue
+        }
+        if (c == 34) {  § closing quote
+            tok.length = dereference(lex).position - tok.start - 1
+            break
+        }
+    }
+    return tok
+}
+
+function scan_number(lex: ptr<JsonLexer>): JsonTokenInfo {
+    declare tok: JsonTokenInfo
+    tok.token_type = JsonToken::NumberValue
+    tok.line = dereference(lex).line
+    tok.column = dereference(lex).column
+    tok.start = dereference(lex).position
+
+    § Optional negative sign
+    if (lexer_peek(lex) == 45) {
+        lexer_advance(lex)
+    }
+
+    § Integer part
+    if (lexer_peek(lex) == 48) {
+        lexer_advance(lex)
+    } else {
+        while (is_digit(lexer_peek(lex))) {
+            lexer_advance(lex)
+        }
+    }
+
+    § Optional fractional part
+    if (lexer_peek(lex) == 46) {
+        lexer_advance(lex)
+        while (is_digit(lexer_peek(lex))) {
+            lexer_advance(lex)
+        }
+    }
+
+    § Optional exponent
+    declare e: u8 = lexer_peek(lex)
+    if (e == 69 || e == 101) {
+        lexer_advance(lex)
+        § Optional sign
+        declare sign: u8 = lexer_peek(lex)
+        if (sign == 43 || sign == 45) {
+            lexer_advance(lex)
+        }
+        while (is_digit(lexer_peek(lex))) {
+            lexer_advance(lex)
+        }
+    }
+
+    tok.length = dereference(lex).position - tok.start
+    return tok
+}
+
+function scan_keyword(lex: ptr<JsonLexer>, expected: ptr<u8>, expected_len: u64, token_type: JsonToken): JsonTokenInfo {
+    declare tok: JsonTokenInfo
+    tok.line = dereference(lex).line
+    tok.column = dereference(lex).column
+    tok.start = dereference(lex).position
+
+    § Verify each character matches
+    declare matched: bool = true
+    for (declare i: u64 = 0; i < expected_len; i = i + 1) {
+        declare c: u8 = lexer_advance(lex)
+        declare e: u8 = dereference(cast<ptr<u8>>(cast<u64>(expected) + i))
+        if (c != e) {
+            matched = false
+            break
+        }
+    }
+
+    if (matched) {
+        tok.token_type = token_type
+        tok.length = expected_len
+    } else {
+        tok.token_type = JsonToken::Error
+        tok.length = 0
+    }
+    return tok
+}
+
+§ --- Main Tokenizer ---
+
+function next_token(lex: ptr<JsonLexer>): JsonTokenInfo {
+    lexer_skip_whitespace(lex)
+
+    declare tok: JsonTokenInfo
+    tok.line = dereference(lex).line
+    tok.column = dereference(lex).column
+
+    declare c: u8 = lexer_peek(lex)
+
+    § End of input
+    if (c == 0 || dereference(lex).position >= dereference(lex).length) {
+        tok.token_type = JsonToken::EndOfInput
+        tok.start = dereference(lex).position
+        tok.length = 0
+        return tok
+    }
+
+    § Single-character tokens
+    if (c == 123) {  § '{'
+        lexer_advance(lex)
+        tok.token_type = JsonToken::LeftBrace
+        tok.start = dereference(lex).position - 1
+        tok.length = 1
+        return tok
+    }
+    if (c == 125) {  § '}'
+        lexer_advance(lex)
+        tok.token_type = JsonToken::RightBrace
+        tok.start = dereference(lex).position - 1
+        tok.length = 1
+        return tok
+    }
+    if (c == 91) {   § '['
+        lexer_advance(lex)
+        tok.token_type = JsonToken::LeftBracket
+        tok.start = dereference(lex).position - 1
+        tok.length = 1
+        return tok
+    }
+    if (c == 93) {   § ']'
+        lexer_advance(lex)
+        tok.token_type = JsonToken::RightBracket
+        tok.start = dereference(lex).position - 1
+        tok.length = 1
+        return tok
+    }
+    if (c == 58) {   § ':'
+        lexer_advance(lex)
+        tok.token_type = JsonToken::Colon
+        tok.start = dereference(lex).position - 1
+        tok.length = 1
+        return tok
+    }
+    if (c == 44) {   § ','
+        lexer_advance(lex)
+        tok.token_type = JsonToken::Comma
+        tok.start = dereference(lex).position - 1
+        tok.length = 1
+        return tok
+    }
+
+    § String
+    if (c == 34) {   § '"'
+        return scan_string(lex)
+    }
+
+    § Number
+    if (is_digit(c) || c == 45) {
+        return scan_number(lex)
+    }
+
+    § Keywords: true, false, null
+    if (c == 116) {  § 't'
+        declare kw: array<u8, 4> = "true"
+        return scan_keyword(lex, cast<ptr<u8>>(address_of(kw)), 4, JsonToken::TrueValue)
+    }
+    if (c == 102) {  § 'f'
+        declare kw: array<u8, 5> = "false"
+        return scan_keyword(lex, cast<ptr<u8>>(address_of(kw)), 5, JsonToken::FalseValue)
+    }
+    if (c == 110) {  § 'n'
+        declare kw: array<u8, 4> = "null"
+        return scan_keyword(lex, cast<ptr<u8>>(address_of(kw)), 4, JsonToken::NullValue)
+    }
+
+    § Unknown character
+    tok.token_type = JsonToken::Error
+    tok.start = dereference(lex).position
+    tok.length = 1
+    lexer_advance(lex)
+    return tok
+}
+
+§ --- Fast Number Parser ---
+
+function parse_integer(s: ptr<u8>, len: u64): i64 {
+    declare result: i64 = 0
+    declare negative: bool = false
+    declare i: u64 = 0
+
+    § Check sign
+    if (len > 0) {
+        declare first: u8 = dereference(cast<ptr<u8>>(cast<u64>(s) + 0))
+        if (first == 45) {
+            negative = true
+            i = 1
+        }
+    }
+
+    § Parse digits
+    while (i < len) {
+        declare c: u8 = dereference(cast<ptr<u8>>(cast<u64>(s) + i))
+        if (!is_digit(c)) { break }
+        result = result * 10 + cast<i64>(c - 48)
+        i = i + 1
+    }
+
+    if (negative) {
+        return 0 - result
+    }
+    return result
+}
+
+function parse_float(s: ptr<u8>, len: u64): f64 {
+    declare result: f64 = 0.0
+    declare negative: bool = false
+    declare i: u64 = 0
+
+    § Check sign
+    if (len > 0 && dereference(cast<ptr<u8>>(cast<u64>(s) + 0)) == 45) {
+        negative = true
+        i = 1
+    }
+
+    § Integer part
+    while (i < len) {
+        declare c: u8 = dereference(cast<ptr<u8>>(cast<u64>(s) + i))
+        if (!is_digit(c)) { break }
+        result = result * 10.0 + cast<f64>(c - 48)
+        i = i + 1
+    }
+
+    § Fractional part
+    if (i < len && dereference(cast<ptr<u8>>(cast<u64>(s) + i)) == 46) {
+        i = i + 1
+        declare factor: f64 = 0.1
+        while (i < len) {
+            declare c: u8 = dereference(cast<ptr<u8>>(cast<u64>(s) + i))
+            if (!is_digit(c)) { break }
+            result = result + cast<f64>(c - 48) * factor
+            factor = factor * 0.1
+            i = i + 1
+        }
+    }
+
+    § Exponent part
+    if (i < len) {
+        declare e: u8 = dereference(cast<ptr<u8>>(cast<u64>(s) + i))
+        if (e == 69 || e == 101) {
+            i = i + 1
+            declare exp_neg: bool = false
+            if (i < len) {
+                declare sign_c: u8 = dereference(cast<ptr<u8>>(cast<u64>(s) + i))
+                if (sign_c == 45) { exp_neg = true; i = i + 1 }
+                if (sign_c == 43) { i = i + 1 }
+            }
+            declare exp_val: i32 = 0
+            while (i < len) {
+                declare c: u8 = dereference(cast<ptr<u8>>(cast<u64>(s) + i))
+                if (!is_digit(c)) { break }
+                exp_val = exp_val * 10 + cast<i32>(c - 48)
+                i = i + 1
+            }
+            § Apply exponent
+            declare multiplier: f64 = 1.0
+            for (declare j: i32 = 0; j < exp_val; j = j + 1) {
+                multiplier = multiplier * 10.0
+            }
+            if (exp_neg) {
+                result = result / multiplier
+            } else {
+                result = result * multiplier
+            }
+        }
+    }
+
+    if (negative) {
+        return 0.0 - result
+    }
+    return result
+}
+
+§ --- Recursive Descent Parser ---
+
+function parse_value(lex: ptr<JsonLexer>): JsonParseResult {
+    declare result: JsonParseResult
+    result.success = true
+    result.tokens_consumed = 0
+
+    declare tok: JsonTokenInfo = next_token(lex)
+    result.tokens_consumed = 1
+
+    switch (cast<i32>(tok.token_type)) {
+        case 6:  § StringValue
+            result.value.value_type = JsonType::String
+            result.value.data_start = tok.start
+            result.value.data_length = tok.length
+            break
+
+        case 7:  § NumberValue
+            result.value.value_type = JsonType::Number
+            result.value.data_start = tok.start
+            result.value.data_length = tok.length
+            result.value.number_value = parse_float(
+                cast<ptr<u8>>(cast<u64>(dereference(lex).input) + tok.start),
+                tok.length
+            )
+            break
+
+        case 8:  § TrueValue
+            result.value.value_type = JsonType::Boolean
+            result.value.bool_value = true
+            break
+
+        case 9:  § FalseValue
+            result.value.value_type = JsonType::Boolean
+            result.value.bool_value = false
+            break
+
+        case 10: § NullValue
+            result.value.value_type = JsonType::Null
+            break
+
+        case 0:  § LeftBrace -> Object
+            result.value.value_type = JsonType::Object
+            result.value.child_count = 0
+            § Parse key-value pairs
+            loop {
+                declare peek_tok: JsonTokenInfo = next_token(lex)
+                if (peek_tok.token_type == JsonToken::RightBrace) {
+                    break
+                }
+                § Expect string key
+                if (peek_tok.token_type != JsonToken::StringValue) {
+                    result.success = false
+                    result.error_line = peek_tok.line
+                    result.error_column = peek_tok.column
+                    break
+                }
+                § Expect colon
+                declare colon_tok: JsonTokenInfo = next_token(lex)
+                if (colon_tok.token_type != JsonToken::Colon) {
+                    result.success = false
+                    break
+                }
+                § Parse value (recursive)
+                declare child_result: JsonParseResult = parse_value(lex)
+                if (!child_result.success) {
+                    result.success = false
+                    break
+                }
+                result.value.child_count = result.value.child_count + 1
+                § Check for comma or end
+                declare sep_tok: JsonTokenInfo = next_token(lex)
+                if (sep_tok.token_type == JsonToken::RightBrace) {
+                    break
+                }
+                if (sep_tok.token_type != JsonToken::Comma) {
+                    result.success = false
+                    break
+                }
+            }
+            break
+
+        case 2:  § LeftBracket -> Array
+            result.value.value_type = JsonType::Array
+            result.value.child_count = 0
+            § Parse array elements
+            loop {
+                declare peek_arr: JsonTokenInfo = next_token(lex)
+                if (peek_arr.token_type == JsonToken::RightBracket) {
+                    break
+                }
+                § Put token back (rewind position)
+                dereference(lex).position = peek_arr.start
+
+                § Parse value
+                declare arr_child: JsonParseResult = parse_value(lex)
+                if (!arr_child.success) {
+                    result.success = false
+                    break
+                }
+                result.value.child_count = result.value.child_count + 1
+                § Check for comma or end
+                declare arr_sep: JsonTokenInfo = next_token(lex)
+                if (arr_sep.token_type == JsonToken::RightBracket) {
+                    break
+                }
+                if (arr_sep.token_type != JsonToken::Comma) {
+                    result.success = false
+                    break
+                }
+            }
+            break
+
+        default:
+            result.success = false
+            result.error_line = tok.line
+            result.error_column = tok.column
+            result.error_offset = tok.start
+            break
+    }
+
+    return result
+}
+
+§ --- Public API ---
+
+function json_parse(input: ptr<u8>, length: u64): JsonParseResult {
+    declare lex: JsonLexer = lexer_init(input, length)
+    return parse_value(address_of(lex))
+}
+
+function json_validate(input: ptr<u8>, length: u64): bool {
+    declare result: JsonParseResult = json_parse(input, length)
+    return result.success
+}

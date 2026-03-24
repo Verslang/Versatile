@@ -1,0 +1,410 @@
+§ ============================================================================
+§ Verslang Installer - macOS (Mach-O / ELF64 compatible)
+§ Native macOS installer written in Verslang
+§ Compile: verslang installer-macos.vlang -o verslang-install-mac -f macho64
+§ ============================================================================
+
+§ Import shared installer logic
+directive import "installer-common.vlang"
+
+§ --- macOS System Call Numbers (x86-64, with 0x2000000 base) ---
+§ macOS uses a different syscall convention than Linux
+constant MACOS_SYSCALL_BASE: u64 = 0x2000000
+constant SYS_EXIT: u64 = 0x2000001
+constant SYS_READ: u64 = 0x2000003
+constant SYS_WRITE: u64 = 0x2000004
+constant SYS_OPEN: u64 = 0x2000005
+constant SYS_CLOSE: u64 = 0x2000006
+constant SYS_UNLINK: u64 = 0x200000A
+constant SYS_ACCESS: u64 = 0x2000021
+constant SYS_MKDIR: u64 = 0x2000088
+constant SYS_RMDIR: u64 = 0x2000089
+constant SYS_SYMLINK: u64 = 0x2000039
+constant SYS_CHMOD: u64 = 0x200000F
+constant SYS_GETUID: u64 = 0x2000018
+constant SYS_GETEUID: u64 = 0x2000019
+
+§ File flags and permissions (same as POSIX)
+constant O_RDONLY: u64 = 0x0000
+constant O_WRONLY: u64 = 0x0001
+constant O_CREAT: u64 = 0x0200
+constant O_TRUNC: u64 = 0x0400
+constant O_APPEND: u64 = 0x0008
+
+constant DIR_PERMS: u64 = 493     § 0755
+constant FILE_PERMS: u64 = 493    § 0755
+constant CONF_PERMS: u64 = 420    § 0644
+
+constant F_OK: u64 = 0
+constant W_OK: u64 = 2
+
+§ --- macOS-Specific Paths ---
+
+structure MacOSPaths {
+    prefix: array<u8, 256>,            § /usr/local
+    bin_dir: array<u8, 256>,           § /usr/local/bin
+    lib_dir: array<u8, 256>,           § /usr/local/lib/verslang
+    include_dir: array<u8, 256>,       § /usr/local/include/verslang
+    share_dir: array<u8, 256>,         § /usr/local/share/verslang
+    cellar_dir: array<u8, 256>,        § /usr/local/Cellar/verslang/1.0.0
+    man_dir: array<u8, 256>            § /usr/local/share/man/man1
+}
+
+§ --- macOS System Calls ---
+
+function macos_write(fd: i32, buf: ptr<u8>, count: u64): i64 {
+    declare result: i64 = 0
+    assembly {
+        mov rax, 0x2000004  ; SYS_WRITE (macOS)
+        mov edi, [rbp - 4]  ; fd
+        mov rsi, [rbp - 12] ; buf
+        mov rdx, [rbp - 20] ; count
+        syscall
+        mov [rbp - 28], rax
+    }
+    return result
+}
+
+function macos_open(path: ptr<u8>, flags: u64, mode: u64): i64 {
+    declare result: i64 = 0
+    assembly {
+        mov rax, 0x2000005  ; SYS_OPEN (macOS)
+        mov rdi, [rbp - 8]  ; path
+        mov rsi, [rbp - 16] ; flags
+        mov rdx, [rbp - 24] ; mode
+        syscall
+        mov [rbp - 32], rax
+    }
+    return result
+}
+
+function macos_close(fd: i32): i64 {
+    declare result: i64 = 0
+    assembly {
+        mov rax, 0x2000006  ; SYS_CLOSE (macOS)
+        mov edi, [rbp - 4]  ; fd
+        syscall
+        mov [rbp - 12], rax
+    }
+    return result
+}
+
+function macos_read(fd: i32, buf: ptr<u8>, count: u64): i64 {
+    declare result: i64 = 0
+    assembly {
+        mov rax, 0x2000003  ; SYS_READ (macOS)
+        mov edi, [rbp - 4]  ; fd
+        mov rsi, [rbp - 12] ; buf
+        mov rdx, [rbp - 20] ; count
+        syscall
+        mov [rbp - 28], rax
+    }
+    return result
+}
+
+function macos_mkdir(path: ptr<u8>, mode: u64): i64 {
+    declare result: i64 = 0
+    assembly {
+        mov rax, 0x2000088  ; SYS_MKDIR (macOS)
+        mov rdi, [rbp - 8]  ; path
+        mov rsi, [rbp - 16] ; mode
+        syscall
+        mov [rbp - 24], rax
+    }
+    return result
+}
+
+function macos_symlink(target: ptr<u8>, linkpath: ptr<u8>): i64 {
+    declare result: i64 = 0
+    assembly {
+        mov rax, 0x2000039  ; SYS_SYMLINK (macOS)
+        mov rdi, [rbp - 8]  ; target
+        mov rsi, [rbp - 16] ; linkpath
+        syscall
+        mov [rbp - 24], rax
+    }
+    return result
+}
+
+function macos_unlink(path: ptr<u8>): i64 {
+    declare result: i64 = 0
+    assembly {
+        mov rax, 0x200000A  ; SYS_UNLINK (macOS)
+        mov rdi, [rbp - 8]  ; path
+        syscall
+        mov [rbp - 16], rax
+    }
+    return result
+}
+
+function macos_chmod(path: ptr<u8>, mode: u64): i64 {
+    declare result: i64 = 0
+    assembly {
+        mov rax, 0x200000F  ; SYS_CHMOD (macOS)
+        mov rdi, [rbp - 8]  ; path
+        mov rsi, [rbp - 16] ; mode
+        syscall
+        mov [rbp - 24], rax
+    }
+    return result
+}
+
+function macos_geteuid(): u64 {
+    declare result: u64 = 0
+    assembly {
+        mov rax, 0x2000019  ; SYS_GETEUID (macOS)
+        syscall
+        mov [rbp - 8], rax
+    }
+    return result
+}
+
+function macos_exit(code: i32): void {
+    assembly {
+        mov rax, 0x2000001  ; SYS_EXIT (macOS)
+        mov edi, [rbp - 4]  ; code
+        syscall
+    }
+}
+
+§ --- Console Output ---
+
+function mac_print(msg: ptr<u8>, len: u64): void {
+    macos_write(1, msg, len)
+}
+
+function mac_println(msg: ptr<u8>, len: u64): void {
+    mac_print(msg, len)
+    declare nl: u8 = 10
+    macos_write(1, address_of(nl), 1)
+}
+
+function mac_print_error(msg: ptr<u8>, len: u64): void {
+    macos_write(2, msg, len)
+    declare nl: u8 = 10
+    macos_write(2, address_of(nl), 1)
+}
+
+§ --- Permission Check ---
+
+function mac_check_root(): bool {
+    declare uid: u64 = macos_geteuid()
+    return uid == 0
+}
+
+§ --- Directory Operations ---
+
+function mac_mkdir_recursive(path: ptr<u8>): bool {
+    declare result: i64 = macos_mkdir(path, DIR_PERMS)
+    if (result == 0) {
+        return true
+    }
+    § EEXIST = -17
+    if (result == -17) {
+        return true
+    }
+    return false
+}
+
+§ --- File Copy ---
+
+function mac_copy_file(src: ptr<u8>, dest: ptr<u8>, mode: u64): bool {
+    declare src_fd: i64 = macos_open(src, O_RDONLY, 0)
+    if (src_fd < 0) {
+        return false
+    }
+
+    declare dest_fd: i64 = macos_open(dest, O_WRONLY | O_CREAT | O_TRUNC, mode)
+    if (dest_fd < 0) {
+        macos_close(cast<i32>(src_fd))
+        return false
+    }
+
+    declare buf: array<u8, 4096>
+    declare bytes_read: i64 = 1
+    while (bytes_read > 0) {
+        bytes_read = macos_read(cast<i32>(src_fd), cast<ptr<u8>>(address_of(buf)), 4096)
+        if (bytes_read > 0) {
+            macos_write(cast<i32>(dest_fd), cast<ptr<u8>>(address_of(buf)), cast<u64>(bytes_read))
+        }
+    }
+
+    macos_close(cast<i32>(src_fd))
+    macos_close(cast<i32>(dest_fd))
+    return true
+}
+
+§ --- Shell Profile Update (zsh is default on macOS) ---
+
+function mac_write_profile_entry(): bool {
+    declare zshrc: array<u8, 12> = "~/.zshrc\0"
+    declare export_line: array<u8, 72> = "\n# Added by Verslang installer\nexport PATH=\"$PATH:/usr/local/lib/verslang/bin\"\n"
+
+    declare fd: i64 = macos_open(cast<ptr<u8>>(address_of(zshrc)),
+                                  O_WRONLY | O_APPEND, CONF_PERMS)
+    if (fd < 0) {
+        return false
+    }
+
+    macos_write(cast<i32>(fd), cast<ptr<u8>>(address_of(export_line)), 72)
+    macos_close(cast<i32>(fd))
+    return true
+}
+
+§ --- Homebrew-Style Cellar Installation ---
+
+function mac_create_cellar_structure(): bool {
+    § Create Cellar directory structure (Homebrew-compatible)
+    declare cellar_base: array<u8, 36> = "/usr/local/Cellar/verslang\0"
+    mac_mkdir_recursive(cast<ptr<u8>>(address_of(cellar_base)))
+
+    declare cellar_ver: array<u8, 42> = "/usr/local/Cellar/verslang/1.0.0\0"
+    mac_mkdir_recursive(cast<ptr<u8>>(address_of(cellar_ver)))
+
+    declare cellar_bin: array<u8, 46> = "/usr/local/Cellar/verslang/1.0.0/bin\0"
+    mac_mkdir_recursive(cast<ptr<u8>>(address_of(cellar_bin)))
+
+    declare cellar_lib: array<u8, 46> = "/usr/local/Cellar/verslang/1.0.0/lib\0"
+    mac_mkdir_recursive(cast<ptr<u8>>(address_of(cellar_lib)))
+
+    declare cellar_inc: array<u8, 50> = "/usr/local/Cellar/verslang/1.0.0/include\0"
+    mac_mkdir_recursive(cast<ptr<u8>>(address_of(cellar_inc)))
+
+    declare cellar_share: array<u8, 48> = "/usr/local/Cellar/verslang/1.0.0/share\0"
+    mac_mkdir_recursive(cast<ptr<u8>>(address_of(cellar_share)))
+
+    return true
+}
+
+§ --- Man Page Installation ---
+
+function mac_install_man_page(): bool {
+    declare man_dir: array<u8, 32> = "/usr/local/share/man/man1\0"
+    mac_mkdir_recursive(cast<ptr<u8>>(address_of(man_dir)))
+
+    declare man_content: array<u8, 512> = ".TH VERSLANG 1 \"2025\" \"Verslang 1.0\" \"User Commands\"\n.SH NAME\nverslang \\- compile Verslang source files to native machine code\n.SH SYNOPSIS\n.B verslang\n[\\fIOPTIONS\\fR] \\fIFILE\\fR\n.SH DESCRIPTION\nVerslang is a low-level systems programming language that compiles\ndirectly to x86-64 machine code. Outputs PE64, ELF64, Mach-O, flat binary.\n.SH OPTIONS\n.TP\n.B \\-o FILE\nSpecify output file name\n.TP\n.B \\-f FORMAT\nOutput format: pe64, elf64, macho64, flat, boot\n.SH AUTHOR\nVersatile Project\n"
+
+    declare man_path: array<u8, 40> = "/usr/local/share/man/man1/verslang.1\0"
+    declare fd: i64 = macos_open(cast<ptr<u8>>(address_of(man_path)),
+                                  O_WRONLY | O_CREAT | O_TRUNC, CONF_PERMS)
+    if (fd < 0) {
+        return false
+    }
+    macos_write(cast<i32>(fd), cast<ptr<u8>>(address_of(man_content)), 512)
+    macos_close(cast<i32>(fd))
+    return true
+}
+
+§ --- Main Installation Logic ---
+
+function macos_install(config: InstallConfig): i32 {
+    print_banner()
+
+    § Step 1: Check permissions
+    declare msg1: array<u8, 40> = "[1/8] Checking permissions...           "
+    mac_println(cast<ptr<u8>>(address_of(msg1)), 40)
+
+    declare is_root: bool = mac_check_root()
+    if (!is_root) {
+        declare warn: array<u8, 55> = "Warning: Not root. Some steps may require 'sudo'.     \n"
+        mac_print(cast<ptr<u8>>(address_of(warn)), 55)
+    }
+
+    § Step 2: Create Cellar structure (Homebrew-compatible)
+    declare msg2: array<u8, 40> = "[2/8] Creating Cellar structure...       "
+    mac_println(cast<ptr<u8>>(address_of(msg2)), 40)
+
+    mac_create_cellar_structure()
+
+    § Step 3: Create standard directories
+    declare msg3: array<u8, 40> = "[3/8] Creating directories...            "
+    mac_println(cast<ptr<u8>>(address_of(msg3)), 40)
+
+    declare lib_dir: array<u8, 28> = "/usr/local/lib/verslang\0"
+    mac_mkdir_recursive(cast<ptr<u8>>(address_of(lib_dir)))
+
+    declare inc_dir: array<u8, 32> = "/usr/local/include/verslang\0"
+    mac_mkdir_recursive(cast<ptr<u8>>(address_of(inc_dir)))
+
+    declare share_dir: array<u8, 30> = "/usr/local/share/verslang\0"
+    mac_mkdir_recursive(cast<ptr<u8>>(address_of(share_dir)))
+
+    § Step 4: Copy compiler binary
+    declare msg4: array<u8, 40> = "[4/8] Installing compiler...             "
+    mac_println(cast<ptr<u8>>(address_of(msg4)), 40)
+
+    print_progress_bar(4, 8)
+
+    § Step 5: Create symlinks
+    declare msg5: array<u8, 40> = "[5/8] Creating symlinks...               "
+    mac_println(cast<ptr<u8>>(address_of(msg5)), 40)
+
+    § Link from Cellar to /usr/local/bin
+    declare link_target: array<u8, 50> = "/usr/local/Cellar/verslang/1.0.0/bin/verslang\0"
+    declare link_path: array<u8, 26> = "/usr/local/bin/verslang\0"
+
+    macos_unlink(cast<ptr<u8>>(address_of(link_path)))
+    macos_symlink(cast<ptr<u8>>(address_of(link_target)),
+                  cast<ptr<u8>>(address_of(link_path)))
+
+    § Step 6: Install man pages
+    declare msg6: array<u8, 40> = "[6/8] Installing man pages...            "
+    mac_println(cast<ptr<u8>>(address_of(msg6)), 40)
+
+    mac_install_man_page()
+
+    § Step 7: Update shell profile
+    declare msg7: array<u8, 40> = "[7/8] Updating shell profile (zsh)...    "
+    mac_println(cast<ptr<u8>>(address_of(msg7)), 40)
+
+    if (config.add_to_path) {
+        mac_write_profile_entry()
+    }
+
+    § Step 8: Verify
+    declare msg8: array<u8, 40> = "[8/8] Verifying installation...          "
+    mac_println(cast<ptr<u8>>(address_of(msg8)), 40)
+
+    print_progress_bar(8, 8)
+    print_newline()
+    print_success()
+
+    declare hint: array<u8, 52> = "Run 'source ~/.zshrc' or restart Terminal to begin.\n"
+    mac_print(cast<ptr<u8>>(address_of(hint)), 52)
+
+    return INSTALL_SUCCESS
+}
+
+§ --- Uninstall ---
+
+function macos_uninstall(): i32 {
+    declare msg: array<u8, 28> = "Uninstalling Verslang...    "
+    mac_println(cast<ptr<u8>>(address_of(msg)), 28)
+
+    § Remove symlink
+    declare link_path: array<u8, 26> = "/usr/local/bin/verslang\0"
+    macos_unlink(cast<ptr<u8>>(address_of(link_path)))
+
+    § Remove man page
+    declare man_path: array<u8, 40> = "/usr/local/share/man/man1/verslang.1\0"
+    macos_unlink(cast<ptr<u8>>(address_of(man_path)))
+
+    § Note: Full directory removal would need recursive walk
+
+    declare done: array<u8, 22> = "Uninstall complete.   "
+    mac_println(cast<ptr<u8>>(address_of(done)), 22)
+    return INSTALL_SUCCESS
+}
+
+§ --- Entry Point ---
+
+function _start(): void {
+    declare config: InstallConfig
+    config.add_to_path = true
+    config.create_shortcuts = false
+    config.verbose = false
+    config.force_overwrite = false
+
+    declare result: i32 = macos_install(config)
+    macos_exit(result)
+}

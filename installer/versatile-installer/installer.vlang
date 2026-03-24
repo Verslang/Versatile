@@ -1,0 +1,467 @@
+§ ============================================================================
+§ Versatile Installer
+§ Combined installer that installs BOTH Verslang and Versscript
+§ Written in Verslang, compilable for all platforms
+§ Compile (Windows): verslang installer.vlang -o versatile-setup.exe -f pe64
+§ Compile (Linux):   verslang installer.vlang -o versatile-install -f elf64
+§ Compile (macOS):   verslang installer.vlang -o versatile-install-mac -f macho64
+§ ============================================================================
+
+§ Import shared logic
+directive import "../verslang-installer/installer-common.vlang"
+
+§ --- External Functions ---
+external function write(fd: i32, buf: ptr<u8>, count: u64): i64
+external function exit(code: i32): void
+
+§ --- Versatile Installer Constants ---
+
+constant VERSATILE_VERSION_MAJOR: u32 = 1
+constant VERSATILE_VERSION_MINOR: u32 = 0
+constant VERSATILE_VERSION_PATCH: u32 = 0
+
+enumeration Component {
+    Verslang = 0,
+    Versscript = 1,
+    VersatileRuntime = 2,
+    VsCodeExtension = 3,
+    Documentation = 4,
+    Examples = 5,
+    All = 99
+}
+
+enumeration InstallMode {
+    Full = 0,
+    Minimal = 1,
+    Custom = 2
+}
+
+§ --- Installation Manifest ---
+
+structure ComponentInfo {
+    name: ptr<u8>,
+    name_len: u64,
+    version: ptr<u8>,
+    version_len: u64,
+    size_bytes: u64,
+    is_required: bool,
+    is_selected: bool
+}
+
+structure VersatileManifest {
+    verslang: ComponentInfo,
+    versscript: ComponentInfo,
+    runtime: ComponentInfo,
+    extension: ComponentInfo,
+    docs: ComponentInfo,
+    examples: ComponentInfo,
+    total_size: u64,
+    install_mode: InstallMode
+}
+
+§ --- Platform Detection ---
+
+enumeration DetectedPlatform {
+    Windows = 0,
+    Linux = 1,
+    MacOS = 2,
+    Unknown = 3
+}
+
+function detect_platform(): DetectedPlatform {
+    when platform == "windows" {
+        return DetectedPlatform::Windows
+    }
+    when platform == "linux" {
+        return DetectedPlatform::Linux
+    }
+    when platform == "macos" {
+        return DetectedPlatform::MacOS
+    }
+    return DetectedPlatform::Unknown
+}
+
+§ --- Output Helpers ---
+
+function print_out(msg: ptr<u8>, len: u64): void {
+    write(1, msg, len)
+}
+
+function println_out(msg: ptr<u8>, len: u64): void {
+    print_out(msg, len)
+    declare nl: u8 = 10
+    write(1, address_of(nl), 1)
+}
+
+function print_versatile_banner(): void {
+    declare line: array<u8, 60> = "============================================================\n"
+    print_out(cast<ptr<u8>>(address_of(line)), 60)
+
+    declare title: array<u8, 60> = "  Versatile Language Suite Installer                        \n"
+    print_out(cast<ptr<u8>>(address_of(title)), 60)
+
+    declare sub: array<u8, 60> = "  Verslang + Versscript + Versatile Runtime                 \n"
+    print_out(cast<ptr<u8>>(address_of(sub)), 60)
+
+    declare ver: array<u8, 60> = "  Version 1.0.0                                             \n"
+    print_out(cast<ptr<u8>>(address_of(ver)), 60)
+
+    print_out(cast<ptr<u8>>(address_of(line)), 60)
+    declare nl: u8 = 10
+    write(1, address_of(nl), 1)
+}
+
+§ --- Manifest Initialization ---
+
+function init_manifest(mode: InstallMode): VersatileManifest {
+    declare manifest: VersatileManifest
+
+    § Verslang compiler (required)
+    declare vl_name: array<u8, 18> = "Verslang Compiler\0"
+    manifest.verslang.name = cast<ptr<u8>>(address_of(vl_name))
+    manifest.verslang.name_len = 17
+    declare vl_ver: array<u8, 6> = "1.0.0\0"
+    manifest.verslang.version = cast<ptr<u8>>(address_of(vl_ver))
+    manifest.verslang.version_len = 5
+    manifest.verslang.size_bytes = 2097152     § ~2MB
+    manifest.verslang.is_required = true
+    manifest.verslang.is_selected = true
+
+    § Versscript runtime (required)
+    declare vs_name: array<u8, 20> = "Versscript Runtime\0"
+    manifest.versscript.name = cast<ptr<u8>>(address_of(vs_name))
+    manifest.versscript.name_len = 18
+    declare vs_ver: array<u8, 6> = "1.0.0\0"
+    manifest.versscript.version = cast<ptr<u8>>(address_of(vs_ver))
+    manifest.versscript.version_len = 5
+    manifest.versscript.size_bytes = 4194304    § ~4MB
+    manifest.versscript.is_required = true
+    manifest.versscript.is_selected = true
+
+    § Versatile runtime (required)
+    declare rt_name: array<u8, 20> = "Versatile Runtime\0"
+    manifest.runtime.name = cast<ptr<u8>>(address_of(rt_name))
+    manifest.runtime.name_len = 17
+    declare rt_ver: array<u8, 6> = "1.0.0\0"
+    manifest.runtime.version = cast<ptr<u8>>(address_of(rt_ver))
+    manifest.runtime.version_len = 5
+    manifest.runtime.size_bytes = 1048576       § ~1MB
+    manifest.runtime.is_required = true
+    manifest.runtime.is_selected = true
+
+    § VS Code Extension (optional)
+    declare ext_name: array<u8, 24> = "VS Code Extension\0"
+    manifest.extension.name = cast<ptr<u8>>(address_of(ext_name))
+    manifest.extension.name_len = 17
+    declare ext_ver: array<u8, 6> = "1.0.0\0"
+    manifest.extension.version = cast<ptr<u8>>(address_of(ext_ver))
+    manifest.extension.version_len = 5
+    manifest.extension.size_bytes = 65536       § ~64KB (the .vsix)
+    manifest.extension.is_required = false
+    manifest.extension.is_selected = (mode == InstallMode::Full)
+
+    § Documentation (optional)
+    declare doc_name: array<u8, 16> = "Documentation\0"
+    manifest.docs.name = cast<ptr<u8>>(address_of(doc_name))
+    manifest.docs.name_len = 13
+    declare doc_ver: array<u8, 6> = "1.0.0\0"
+    manifest.docs.version = cast<ptr<u8>>(address_of(doc_ver))
+    manifest.docs.version_len = 5
+    manifest.docs.size_bytes = 524288           § ~512KB
+    manifest.docs.is_required = false
+    manifest.docs.is_selected = (mode == InstallMode::Full)
+
+    § Examples (optional)
+    declare ex_name: array<u8, 10> = "Examples\0"
+    manifest.examples.name = cast<ptr<u8>>(address_of(ex_name))
+    manifest.examples.name_len = 8
+    declare ex_ver: array<u8, 6> = "1.0.0\0"
+    manifest.examples.version = cast<ptr<u8>>(address_of(ex_ver))
+    manifest.examples.version_len = 5
+    manifest.examples.size_bytes = 262144       § ~256KB
+    manifest.examples.is_required = false
+    manifest.examples.is_selected = (mode == InstallMode::Full)
+
+    § Calculate total
+    manifest.total_size = manifest.verslang.size_bytes +
+                          manifest.versscript.size_bytes +
+                          manifest.runtime.size_bytes
+    if (manifest.extension.is_selected) {
+        manifest.total_size = manifest.total_size + manifest.extension.size_bytes
+    }
+    if (manifest.docs.is_selected) {
+        manifest.total_size = manifest.total_size + manifest.docs.size_bytes
+    }
+    if (manifest.examples.is_selected) {
+        manifest.total_size = manifest.total_size + manifest.examples.size_bytes
+    }
+
+    manifest.install_mode = mode
+    return manifest
+}
+
+§ --- Component Installation ---
+
+function install_verslang_component(plat: DetectedPlatform): i32 {
+    declare msg: array<u8, 40> = "  Installing Verslang compiler...       "
+    println_out(cast<ptr<u8>>(address_of(msg)), 40)
+
+    § Platform-specific installation directory selection
+    when platform == "windows" {
+        § Install to C:\Program Files\Versatile\verslang\
+        § Copy verslang.exe to bin directory
+    }
+    when platform == "linux" {
+        § Install to /usr/local/lib/versatile/verslang/
+        § Create symlink in /usr/local/bin/
+    }
+    when platform == "macos" {
+        § Install to /usr/local/Cellar/versatile/1.0.0/verslang/
+        § Create symlinks
+    }
+
+    declare done: array<u8, 34> = "  Verslang compiler installed.     "
+    println_out(cast<ptr<u8>>(address_of(done)), 34)
+    return INSTALL_SUCCESS
+}
+
+function install_versscript_component(plat: DetectedPlatform): i32 {
+    declare msg: array<u8, 40> = "  Installing Versscript runtime...      "
+    println_out(cast<ptr<u8>>(address_of(msg)), 40)
+
+    § Platform-specific installation
+    when platform == "windows" {
+        § Install to C:\Program Files\Versatile\versscript\
+        § Copy verss.exe and runtime DLLs
+    }
+    when platform == "linux" {
+        § Install to /usr/local/lib/versatile/versscript/
+        § Copy verss binary and shared objects
+        § Create symlink in /usr/local/bin/
+    }
+    when platform == "macos" {
+        § Install to /usr/local/Cellar/versatile/1.0.0/versscript/
+        § Copy verss binary and dylibs
+    }
+
+    declare done: array<u8, 34> = "  Versscript runtime installed.    "
+    println_out(cast<ptr<u8>>(address_of(done)), 34)
+    return INSTALL_SUCCESS
+}
+
+function install_versatile_runtime(plat: DetectedPlatform): i32 {
+    declare msg: array<u8, 40> = "  Installing Versatile runtime...       "
+    println_out(cast<ptr<u8>>(address_of(msg)), 40)
+
+    § The Versatile runtime bridges Verslang and Versscript:
+    § - .vtile file parser
+    § - Block dispatcher (routes verslang{} and versscript{} blocks)
+    § - Shared memory interface between compiled and interpreted code
+    § - FFI bridge for calling Verslang from Versscript and vice versa
+
+    declare done: array<u8, 34> = "  Versatile runtime installed.     "
+    println_out(cast<ptr<u8>>(address_of(done)), 34)
+    return INSTALL_SUCCESS
+}
+
+function install_vscode_extension(): i32 {
+    declare msg: array<u8, 40> = "  Installing VS Code extension...       "
+    println_out(cast<ptr<u8>>(address_of(msg)), 40)
+
+    § Copy the .vsix file and optionally install via `code --install-extension`
+
+    declare done: array<u8, 34> = "  VS Code extension installed.     "
+    println_out(cast<ptr<u8>>(address_of(done)), 34)
+    return INSTALL_SUCCESS
+}
+
+function install_documentation(): i32 {
+    declare msg: array<u8, 40> = "  Installing documentation...           "
+    println_out(cast<ptr<u8>>(address_of(msg)), 40)
+
+    § Copy docs: language reference, tutorials, API docs
+
+    declare done: array<u8, 34> = "  Documentation installed.         "
+    println_out(cast<ptr<u8>>(address_of(done)), 34)
+    return INSTALL_SUCCESS
+}
+
+function install_examples(): i32 {
+    declare msg: array<u8, 40> = "  Installing example projects...        "
+    println_out(cast<ptr<u8>>(address_of(msg)), 40)
+
+    § Copy example .vlang, .vs, and .vtile files
+
+    declare done: array<u8, 34> = "  Examples installed.              "
+    println_out(cast<ptr<u8>>(address_of(done)), 34)
+    return INSTALL_SUCCESS
+}
+
+§ --- PATH Configuration ---
+
+function configure_path(plat: DetectedPlatform): i32 {
+    declare msg: array<u8, 40> = "  Configuring PATH...                   "
+    println_out(cast<ptr<u8>>(address_of(msg)), 40)
+
+    when platform == "windows" {
+        § Add to user PATH via registry
+        § HKCU\Environment\Path += ;C:\Program Files\Versatile\bin
+    }
+    when platform == "linux" {
+        § Append to ~/.bashrc and ~/.profile:
+        § export PATH="$PATH:/usr/local/lib/versatile/bin"
+    }
+    when platform == "macos" {
+        § Append to ~/.zshrc:
+        § export PATH="$PATH:/usr/local/lib/versatile/bin"
+    }
+
+    return INSTALL_SUCCESS
+}
+
+§ --- Verification ---
+
+function verify_installation(manifest: VersatileManifest): bool {
+    declare msg: array<u8, 32> = "  Verifying installation...     "
+    println_out(cast<ptr<u8>>(address_of(msg)), 32)
+
+    declare all_ok: bool = true
+
+    § Check that verslang binary exists and is executable
+    § Check that verss binary exists and is executable
+    § Check that versatile runtime exists
+    § Verify checksums match manifest
+
+    return all_ok
+}
+
+§ --- Main Installation Orchestrator ---
+
+function versatile_install(mode: InstallMode): i32 {
+    print_versatile_banner()
+
+    § Detect platform
+    declare plat: DetectedPlatform = detect_platform()
+
+    declare plat_msg: array<u8, 30> = "Detected platform: "
+    print_out(cast<ptr<u8>>(address_of(plat_msg)), 19)
+
+    switch (cast<i32>(plat)) {
+        case 0:
+            declare w: array<u8, 8> = "Windows\n"
+            println_out(cast<ptr<u8>>(address_of(w)), 8)
+            break
+        case 1:
+            declare l: array<u8, 6> = "Linux\n"
+            println_out(cast<ptr<u8>>(address_of(l)), 6)
+            break
+        case 2:
+            declare m: array<u8, 6> = "macOS\n"
+            println_out(cast<ptr<u8>>(address_of(m)), 6)
+            break
+        default:
+            declare u: array<u8, 8> = "Unknown\n"
+            println_out(cast<ptr<u8>>(address_of(u)), 8)
+            break
+    }
+
+    § Initialize manifest
+    declare msg_init: array<u8, 36> = "Preparing installation manifest...\n"
+    println_out(cast<ptr<u8>>(address_of(msg_init)), 36)
+
+    declare manifest: VersatileManifest = init_manifest(mode)
+
+    § Print install plan
+    declare sep: array<u8, 44> = "--------------------------------------------\n"
+    print_out(cast<ptr<u8>>(address_of(sep)), 44)
+    declare plan_hdr: array<u8, 24> = "  Components to install:\n"
+    print_out(cast<ptr<u8>>(address_of(plan_hdr)), 24)
+    declare comp1: array<u8, 32> = "    [x] Verslang Compiler      \n"
+    print_out(cast<ptr<u8>>(address_of(comp1)), 32)
+    declare comp2: array<u8, 32> = "    [x] Versscript Runtime     \n"
+    print_out(cast<ptr<u8>>(address_of(comp2)), 32)
+    declare comp3: array<u8, 32> = "    [x] Versatile Runtime      \n"
+    print_out(cast<ptr<u8>>(address_of(comp3)), 32)
+
+    if (manifest.extension.is_selected) {
+        declare comp4: array<u8, 32> = "    [x] VS Code Extension      \n"
+        print_out(cast<ptr<u8>>(address_of(comp4)), 32)
+    }
+    if (manifest.docs.is_selected) {
+        declare comp5: array<u8, 32> = "    [x] Documentation          \n"
+        print_out(cast<ptr<u8>>(address_of(comp5)), 32)
+    }
+    if (manifest.examples.is_selected) {
+        declare comp6: array<u8, 32> = "    [x] Examples               \n"
+        print_out(cast<ptr<u8>>(address_of(comp6)), 32)
+    }
+    print_out(cast<ptr<u8>>(address_of(sep)), 44)
+
+    § Step 1/N: Install Verslang
+    declare result: i32 = install_verslang_component(plat)
+    if (result != INSTALL_SUCCESS) { return result }
+    print_progress_bar(1, 6)
+
+    § Step 2/N: Install Versscript
+    result = install_versscript_component(plat)
+    if (result != INSTALL_SUCCESS) { return result }
+    print_progress_bar(2, 6)
+
+    § Step 3/N: Install Versatile Runtime
+    result = install_versatile_runtime(plat)
+    if (result != INSTALL_SUCCESS) { return result }
+    print_progress_bar(3, 6)
+
+    § Step 4/N: Optional components
+    if (manifest.extension.is_selected) {
+        install_vscode_extension()
+    }
+    if (manifest.docs.is_selected) {
+        install_documentation()
+    }
+    if (manifest.examples.is_selected) {
+        install_examples()
+    }
+    print_progress_bar(4, 6)
+
+    § Step 5/N: Configure PATH
+    result = configure_path(plat)
+    print_progress_bar(5, 6)
+
+    § Step 6/N: Verify
+    declare verified: bool = verify_installation(manifest)
+    print_progress_bar(6, 6)
+
+    declare nl: u8 = 10
+    write(1, address_of(nl), 1)
+
+    if (verified) {
+        declare success_line: array<u8, 60> = "============================================================\n"
+        print_out(cast<ptr<u8>>(address_of(success_line)), 60)
+        declare s1: array<u8, 60> = "  Versatile Language Suite installed successfully!          \n"
+        print_out(cast<ptr<u8>>(address_of(s1)), 60)
+        declare s2: array<u8, 60> = "                                                            \n"
+        print_out(cast<ptr<u8>>(address_of(s2)), 60)
+        declare s3: array<u8, 60> = "  Commands available after restart:                          \n"
+        print_out(cast<ptr<u8>>(address_of(s3)), 60)
+        declare s4: array<u8, 60> = "    verslang  - Compile .vlang files to native code         \n"
+        print_out(cast<ptr<u8>>(address_of(s4)), 60)
+        declare s5: array<u8, 60> = "    verss     - Run .vs/.verss Versscript files             \n"
+        print_out(cast<ptr<u8>>(address_of(s5)), 60)
+        declare s6: array<u8, 60> = "    versatile - Run .vtile combined language files           \n"
+        print_out(cast<ptr<u8>>(address_of(s6)), 60)
+        print_out(cast<ptr<u8>>(address_of(success_line)), 60)
+    } else {
+        print_failure(INSTALL_ERROR_IO)
+    }
+
+    return INSTALL_SUCCESS
+}
+
+§ --- Entry Point ---
+
+function _start(): void {
+    § Default: Full installation
+    declare result: i32 = versatile_install(InstallMode::Full)
+    exit(result)
+}

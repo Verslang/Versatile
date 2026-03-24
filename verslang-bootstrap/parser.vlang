@@ -1,0 +1,984 @@
+§ ============================================================================
+§ Verslang Bootstrap Compiler: Parser
+§ Recursive descent parser for Verslang, written in Verslang itself
+§ Produces an AST from a token stream
+§ Compile: verslang parser.vlang -o parser.o -f obj
+§ ============================================================================
+
+§ --- AST Node Types ---
+
+enumeration NodeKind {
+    § Top-level declarations
+    Program = 0,
+    FunctionDecl = 1,
+    ExternalFuncDecl = 2,
+    StructureDecl = 3,
+    EnumerationDecl = 4,
+    UnionDecl = 5,
+    BitfieldDecl = 6,
+    ConstantDecl = 7,
+    DirectiveDecl = 8,
+    WhenBlock = 9,
+
+    § Statements
+    DeclareStmt = 20,
+    AssignStmt = 21,
+    ReturnStmt = 22,
+    IfStmt = 23,
+    WhileStmt = 24,
+    ForStmt = 25,
+    LoopStmt = 26,
+    BreakStmt = 27,
+    ContinueStmt = 28,
+    SwitchStmt = 29,
+    CaseClause = 30,
+    DefaultClause = 31,
+    BlockStmt = 32,
+    ExprStmt = 33,
+    AssemblyStmt = 34,
+
+    § Expressions
+    BinaryExpr = 50,
+    UnaryExpr = 51,
+    CallExpr = 52,
+    IndexExpr = 53,
+    MemberExpr = 54,
+    CastExpr = 55,
+    SizeofExpr = 56,
+    AlignofExpr = 57,
+    AddressOfExpr = 58,
+    DereferenceExpr = 59,
+    SyscallExpr = 60,
+    BitcastExpr = 61,
+    ScopeResExpr = 62,
+
+    § Literals
+    IntLiteral = 70,
+    FloatLiteral = 71,
+    StringLiteral = 72,
+    CharLiteral = 73,
+    BoolLiteral = 74,
+    IdentifierExpr = 75,
+
+    § Types
+    TypePrimitive = 90,
+    TypePointer = 91,
+    TypeArray = 92,
+
+    § Parameters and fields
+    Parameter = 100,
+    StructField = 101,
+    EnumVariant = 102
+}
+
+§ --- AST Node ---
+
+constant MAX_CHILDREN: u64 = 16
+
+structure AstNode {
+    kind: NodeKind,
+    § Token info
+    token_start: u64,
+    token_length: u64,
+    line: u32,
+    column: u32,
+    § Children (index into node pool)
+    children: array<u32, 16>,
+    child_count: u32,
+    § For numeric literals
+    int_value: i64,
+    float_value: f64,
+    § For identifiers/strings: offset into source
+    name_start: u64,
+    name_length: u64,
+    § Data type annotation index
+    type_node: u32,
+    § Flags
+    is_mutable: bool,
+    is_external: bool
+}
+
+§ --- Node Pool ---
+
+constant MAX_NODES: u64 = 65536
+
+structure NodePool {
+    nodes: ptr<AstNode>,
+    count: u32,
+    capacity: u32
+}
+
+§ --- Parser State ---
+
+structure Parser {
+    source: ptr<u8>,
+    source_length: u64,
+    tokens: ptr<Token>,
+    token_count: u64,
+    current: u64,
+    pool: NodePool,
+    error_count: u32,
+    error_line: u32,
+    error_column: u32
+}
+
+§ --- Import Token type from lexer ---
+§ In a real build, this would be linked; here we redeclare for compilation
+
+§ --- Node Pool Management ---
+
+when platform == "linux" {
+    function parser_alloc(size: u64): ptr<u8> {
+        declare result: u64
+        assembly {
+            "mov rax, 9"
+            "xor rdi, rdi"
+            "mov rsi, %[size]"
+            "mov rdx, 3"
+            "mov r10, 34"
+            "mov r8, -1"
+            "xor r9, r9"
+            "syscall"
+            "mov %[result], rax"
+        }
+        return cast<ptr<u8>>(result)
+    }
+}
+
+when platform == "windows" {
+    external function VirtualAlloc(addr: ptr<u8>, size: u64, type: u32, protect: u32): ptr<u8>
+
+    function parser_alloc(size: u64): ptr<u8> {
+        return VirtualAlloc(cast<ptr<u8>>(0), size, 0x3000, 0x04)
+    }
+}
+
+function pool_init(pool: ptr<NodePool>): void {
+    declare alloc_size: u64 = sizeof(AstNode) * MAX_NODES
+    dereference(pool).nodes = cast<ptr<AstNode>>(parser_alloc(alloc_size))
+    dereference(pool).count = 0
+    dereference(pool).capacity = cast<u32>(MAX_NODES)
+}
+
+function pool_alloc_node(pool: ptr<NodePool>, kind: NodeKind): u32 {
+    declare idx: u32 = dereference(pool).count
+    if (cast<u64>(idx) >= MAX_NODES) {
+        return 0  § Pool exhausted
+    }
+
+    declare node: ptr<AstNode> = cast<ptr<AstNode>>(
+        cast<u64>(dereference(pool).nodes) + cast<u64>(idx) * sizeof(AstNode)
+    )
+
+    § Zero initialize
+    declare p: ptr<u8> = cast<ptr<u8>>(node)
+    for (declare i: u64 = 0; i < sizeof(AstNode); i = i + 1) {
+        dereference(cast<ptr<u8>>(cast<u64>(p) + i)) = 0
+    }
+
+    dereference(node).kind = kind
+    dereference(pool).count = idx + 1
+    return idx
+}
+
+function pool_get_node(pool: ptr<NodePool>, idx: u32): ptr<AstNode> {
+    return cast<ptr<AstNode>>(
+        cast<u64>(dereference(pool).nodes) + cast<u64>(idx) * sizeof(AstNode)
+    )
+}
+
+function node_add_child(pool: ptr<NodePool>, parent: u32, child: u32): void {
+    declare node: ptr<AstNode> = pool_get_node(pool, parent)
+    declare cc: u32 = dereference(node).child_count
+    if (cc < cast<u32>(MAX_CHILDREN)) {
+        dereference(node).children[cast<u64>(cc)] = child
+        dereference(node).child_count = cc + 1
+    }
+}
+
+§ --- Parser Core ---
+
+function parser_init(source: ptr<u8>, source_length: u64, tokens: ptr<Token>, token_count: u64): Parser {
+    declare p: Parser
+    p.source = source
+    p.source_length = source_length
+    p.tokens = tokens
+    p.token_count = token_count
+    p.current = 0
+    p.error_count = 0
+    p.error_line = 0
+    p.error_column = 0
+    pool_init(address_of(p.pool))
+    return p
+}
+
+function parser_current_token(p: ptr<Parser>): Token {
+    declare idx: u64 = dereference(p).current
+    return dereference(cast<ptr<Token>>(
+        cast<u64>(dereference(p).tokens) + idx * sizeof(Token)
+    ))
+}
+
+function parser_peek_kind(p: ptr<Parser>): TokenKind {
+    declare tok: Token = parser_current_token(p)
+    return tok.kind
+}
+
+function parser_advance(p: ptr<Parser>): Token {
+    declare tok: Token = parser_current_token(p)
+    if (tok.kind != TokenKind::EndOfFile) {
+        dereference(p).current = dereference(p).current + 1
+    }
+    return tok
+}
+
+function parser_expect(p: ptr<Parser>, kind: TokenKind): Token {
+    declare tok: Token = parser_current_token(p)
+    if (tok.kind != kind) {
+        dereference(p).error_count = dereference(p).error_count + 1
+        dereference(p).error_line = tok.line
+        dereference(p).error_column = tok.column
+    }
+    return parser_advance(p)
+}
+
+function parser_match(p: ptr<Parser>, kind: TokenKind): bool {
+    if (parser_peek_kind(p) == kind) {
+        parser_advance(p)
+        return true
+    }
+    return false
+}
+
+§ --- Type Parsing ---
+
+function parse_type(p: ptr<Parser>): u32 {
+    declare kind: TokenKind = parser_peek_kind(p)
+
+    § Pointer type: ptr<T>
+    if (kind == TokenKind::KwPtr) {
+        declare type_node: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::TypePointer)
+        parser_advance(p)
+        parser_expect(p, TokenKind::Less)
+        declare inner: u32 = parse_type(p)
+        node_add_child(address_of(dereference(p).pool), type_node, inner)
+        parser_expect(p, TokenKind::Greater)
+        return type_node
+    }
+
+    § Array type: array<T, N>
+    if (kind == TokenKind::KwArray) {
+        declare type_node: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::TypeArray)
+        parser_advance(p)
+        parser_expect(p, TokenKind::Less)
+        declare elem_type: u32 = parse_type(p)
+        node_add_child(address_of(dereference(p).pool), type_node, elem_type)
+        parser_expect(p, TokenKind::Comma)
+        declare size_expr: u32 = parse_expression(p, 0)
+        node_add_child(address_of(dereference(p).pool), type_node, size_expr)
+        parser_expect(p, TokenKind::Greater)
+        return type_node
+    }
+
+    § Primitive types
+    declare type_node: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::TypePrimitive)
+    declare tok: Token = parser_advance(p)
+    declare node: ptr<AstNode> = pool_get_node(address_of(dereference(p).pool), type_node)
+    dereference(node).name_start = tok.start
+    dereference(node).name_length = tok.length
+    dereference(node).line = tok.line
+    dereference(node).column = tok.column
+    return type_node
+}
+
+§ --- Expression Parsing (Pratt Parser) ---
+
+function get_prefix_precedence(kind: TokenKind): i32 {
+    if (kind == TokenKind::Minus) { return 14 }
+    if (kind == TokenKind::Bang) { return 14 }
+    if (kind == TokenKind::Tilde) { return 14 }
+    return 0
+}
+
+function get_infix_precedence(kind: TokenKind): i32 {
+    if (kind == TokenKind::PipePipe) { return 2 }
+    if (kind == TokenKind::AmpAmp) { return 3 }
+    if (kind == TokenKind::Pipe) { return 4 }
+    if (kind == TokenKind::Caret) { return 5 }
+    if (kind == TokenKind::Ampersand) { return 6 }
+    if (kind == TokenKind::EqualEqual || kind == TokenKind::BangEqual) { return 7 }
+    if (kind == TokenKind::Less || kind == TokenKind::Greater || kind == TokenKind::LessEqual || kind == TokenKind::GreaterEqual) { return 8 }
+    if (kind == TokenKind::ShiftLeft || kind == TokenKind::ShiftRight) { return 9 }
+    if (kind == TokenKind::Plus || kind == TokenKind::Minus) { return 10 }
+    if (kind == TokenKind::Star || kind == TokenKind::Slash || kind == TokenKind::Percent) { return 11 }
+    return 0
+}
+
+function parse_primary(p: ptr<Parser>): u32 {
+    declare kind: TokenKind = parser_peek_kind(p)
+
+    § Integer literal
+    if (kind == TokenKind::IntegerLiteral || kind == TokenKind::HexLiteral || kind == TokenKind::BinaryLiteral) {
+        declare node_idx: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::IntLiteral)
+        declare tok: Token = parser_advance(p)
+        declare node: ptr<AstNode> = pool_get_node(address_of(dereference(p).pool), node_idx)
+        dereference(node).token_start = tok.start
+        dereference(node).token_length = tok.length
+        dereference(node).line = tok.line
+        dereference(node).column = tok.column
+        return node_idx
+    }
+
+    § Float literal
+    if (kind == TokenKind::FloatLiteral) {
+        declare node_idx: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::FloatLiteral)
+        declare tok: Token = parser_advance(p)
+        declare node: ptr<AstNode> = pool_get_node(address_of(dereference(p).pool), node_idx)
+        dereference(node).token_start = tok.start
+        dereference(node).token_length = tok.length
+        dereference(node).line = tok.line
+        return node_idx
+    }
+
+    § String literal
+    if (kind == TokenKind::StringLiteral) {
+        declare node_idx: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::StringLiteral)
+        declare tok: Token = parser_advance(p)
+        declare node: ptr<AstNode> = pool_get_node(address_of(dereference(p).pool), node_idx)
+        dereference(node).token_start = tok.start
+        dereference(node).token_length = tok.length
+        dereference(node).line = tok.line
+        return node_idx
+    }
+
+    § Char literal
+    if (kind == TokenKind::CharLiteral) {
+        declare node_idx: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::CharLiteral)
+        declare tok: Token = parser_advance(p)
+        declare node: ptr<AstNode> = pool_get_node(address_of(dereference(p).pool), node_idx)
+        dereference(node).token_start = tok.start
+        dereference(node).token_length = tok.length
+        return node_idx
+    }
+
+    § Boolean literals
+    if (kind == TokenKind::KwTrue || kind == TokenKind::KwFalse) {
+        declare node_idx: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::BoolLiteral)
+        declare tok: Token = parser_advance(p)
+        declare node: ptr<AstNode> = pool_get_node(address_of(dereference(p).pool), node_idx)
+        dereference(node).int_value = cast<i64>(kind == TokenKind::KwTrue)
+        dereference(node).line = tok.line
+        return node_idx
+    }
+
+    § Parenthesized expression
+    if (kind == TokenKind::LeftParen) {
+        parser_advance(p)
+        declare inner: u32 = parse_expression(p, 0)
+        parser_expect(p, TokenKind::RightParen)
+        return inner
+    }
+
+    § cast<T>(expr)
+    if (kind == TokenKind::KwCast) {
+        declare node_idx: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::CastExpr)
+        parser_advance(p)
+        parser_expect(p, TokenKind::Less)
+        declare target_type: u32 = parse_type(p)
+        parser_expect(p, TokenKind::Greater)
+        parser_expect(p, TokenKind::LeftParen)
+        declare expr: u32 = parse_expression(p, 0)
+        parser_expect(p, TokenKind::RightParen)
+        node_add_child(address_of(dereference(p).pool), node_idx, target_type)
+        node_add_child(address_of(dereference(p).pool), node_idx, expr)
+        return node_idx
+    }
+
+    § sizeof(Type)
+    if (kind == TokenKind::KwSizeof) {
+        declare node_idx: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::SizeofExpr)
+        parser_advance(p)
+        parser_expect(p, TokenKind::LeftParen)
+        declare type_arg: u32 = parse_type(p)
+        parser_expect(p, TokenKind::RightParen)
+        node_add_child(address_of(dereference(p).pool), node_idx, type_arg)
+        return node_idx
+    }
+
+    § address_of(expr)
+    if (kind == TokenKind::KwAddress_of) {
+        declare node_idx: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::AddressOfExpr)
+        parser_advance(p)
+        parser_expect(p, TokenKind::LeftParen)
+        declare operand: u32 = parse_expression(p, 0)
+        parser_expect(p, TokenKind::RightParen)
+        node_add_child(address_of(dereference(p).pool), node_idx, operand)
+        return node_idx
+    }
+
+    § dereference(expr)
+    if (kind == TokenKind::KwDereference) {
+        declare node_idx: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::DereferenceExpr)
+        parser_advance(p)
+        parser_expect(p, TokenKind::LeftParen)
+        declare operand: u32 = parse_expression(p, 0)
+        parser_expect(p, TokenKind::RightParen)
+        node_add_child(address_of(dereference(p).pool), node_idx, operand)
+        return node_idx
+    }
+
+    § syscall(num, args...)
+    if (kind == TokenKind::KwSyscall) {
+        declare node_idx: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::SyscallExpr)
+        parser_advance(p)
+        parser_expect(p, TokenKind::LeftParen)
+        § Parse arguments
+        if (parser_peek_kind(p) != TokenKind::RightParen) {
+            declare arg: u32 = parse_expression(p, 0)
+            node_add_child(address_of(dereference(p).pool), node_idx, arg)
+            while (parser_match(p, TokenKind::Comma)) {
+                arg = parse_expression(p, 0)
+                node_add_child(address_of(dereference(p).pool), node_idx, arg)
+            }
+        }
+        parser_expect(p, TokenKind::RightParen)
+        return node_idx
+    }
+
+    § Identifier (may be followed by function call, member access, scope resolution)
+    if (kind == TokenKind::Identifier) {
+        declare node_idx: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::IdentifierExpr)
+        declare tok: Token = parser_advance(p)
+        declare node: ptr<AstNode> = pool_get_node(address_of(dereference(p).pool), node_idx)
+        dereference(node).name_start = tok.start
+        dereference(node).name_length = tok.length
+        dereference(node).line = tok.line
+        dereference(node).column = tok.column
+        return node_idx
+    }
+
+    § Unary prefix
+    if (kind == TokenKind::Minus || kind == TokenKind::Bang || kind == TokenKind::Tilde) {
+        declare node_idx: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::UnaryExpr)
+        declare op_tok: Token = parser_advance(p)
+        declare operand: u32 = parse_expression(p, 14)
+        declare node: ptr<AstNode> = pool_get_node(address_of(dereference(p).pool), node_idx)
+        dereference(node).token_start = op_tok.start
+        dereference(node).token_length = op_tok.length
+        node_add_child(address_of(dereference(p).pool), node_idx, operand)
+        return node_idx
+    }
+
+    § Error: unexpected token
+    dereference(p).error_count = dereference(p).error_count + 1
+    declare err_tok: Token = parser_current_token(p)
+    dereference(p).error_line = err_tok.line
+    dereference(p).error_column = err_tok.column
+    parser_advance(p)
+    return pool_alloc_node(address_of(dereference(p).pool), NodeKind::IntLiteral)
+}
+
+function parse_postfix(p: ptr<Parser>, left: u32): u32 {
+    declare result: u32 = left
+
+    loop {
+        declare kind: TokenKind = parser_peek_kind(p)
+
+        § Function call: expr(args...)
+        if (kind == TokenKind::LeftParen) {
+            declare call_node: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::CallExpr)
+            node_add_child(address_of(dereference(p).pool), call_node, result)
+            parser_advance(p)
+            if (parser_peek_kind(p) != TokenKind::RightParen) {
+                declare arg: u32 = parse_expression(p, 0)
+                node_add_child(address_of(dereference(p).pool), call_node, arg)
+                while (parser_match(p, TokenKind::Comma)) {
+                    arg = parse_expression(p, 0)
+                    node_add_child(address_of(dereference(p).pool), call_node, arg)
+                }
+            }
+            parser_expect(p, TokenKind::RightParen)
+            result = call_node
+            continue
+        }
+
+        § Array index: expr[index]
+        if (kind == TokenKind::LeftBracket) {
+            declare idx_node: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::IndexExpr)
+            parser_advance(p)
+            declare index: u32 = parse_expression(p, 0)
+            parser_expect(p, TokenKind::RightBracket)
+            node_add_child(address_of(dereference(p).pool), idx_node, result)
+            node_add_child(address_of(dereference(p).pool), idx_node, index)
+            result = idx_node
+            continue
+        }
+
+        § Member access: expr.field
+        if (kind == TokenKind::Dot) {
+            declare mem_node: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::MemberExpr)
+            parser_advance(p)
+            declare field_tok: Token = parser_expect(p, TokenKind::Identifier)
+            declare mem: ptr<AstNode> = pool_get_node(address_of(dereference(p).pool), mem_node)
+            dereference(mem).name_start = field_tok.start
+            dereference(mem).name_length = field_tok.length
+            node_add_child(address_of(dereference(p).pool), mem_node, result)
+            result = mem_node
+            continue
+        }
+
+        § Scope resolution: Type::Variant
+        if (kind == TokenKind::ColonColon) {
+            declare scope_node: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::ScopeResExpr)
+            parser_advance(p)
+            declare member_tok: Token = parser_expect(p, TokenKind::Identifier)
+            declare sn: ptr<AstNode> = pool_get_node(address_of(dereference(p).pool), scope_node)
+            dereference(sn).name_start = member_tok.start
+            dereference(sn).name_length = member_tok.length
+            node_add_child(address_of(dereference(p).pool), scope_node, result)
+            result = scope_node
+            continue
+        }
+
+        break
+    }
+
+    return result
+}
+
+function parse_expression(p: ptr<Parser>, min_prec: i32): u32 {
+    declare left: u32 = parse_primary(p)
+    left = parse_postfix(p, left)
+
+    loop {
+        declare op_kind: TokenKind = parser_peek_kind(p)
+        declare prec: i32 = get_infix_precedence(op_kind)
+
+        if (prec <= min_prec) {
+            break
+        }
+
+        declare bin_node: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::BinaryExpr)
+        declare op_tok: Token = parser_advance(p)
+        declare bn: ptr<AstNode> = pool_get_node(address_of(dereference(p).pool), bin_node)
+        dereference(bn).token_start = op_tok.start
+        dereference(bn).token_length = op_tok.length
+        dereference(bn).line = op_tok.line
+
+        declare right: u32 = parse_expression(p, prec)
+
+        node_add_child(address_of(dereference(p).pool), bin_node, left)
+        node_add_child(address_of(dereference(p).pool), bin_node, right)
+        left = bin_node
+    }
+
+    return left
+}
+
+§ --- Statement Parsing ---
+
+function parse_block(p: ptr<Parser>): u32 {
+    declare block_node: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::BlockStmt)
+    parser_expect(p, TokenKind::LeftBrace)
+
+    while (parser_peek_kind(p) != TokenKind::RightBrace && parser_peek_kind(p) != TokenKind::EndOfFile) {
+        declare stmt: u32 = parse_statement(p)
+        node_add_child(address_of(dereference(p).pool), block_node, stmt)
+    }
+
+    parser_expect(p, TokenKind::RightBrace)
+    return block_node
+}
+
+function parse_statement(p: ptr<Parser>): u32 {
+    declare kind: TokenKind = parser_peek_kind(p)
+
+    § declare var: Type = expr
+    if (kind == TokenKind::KwDeclare) {
+        declare node_idx: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::DeclareStmt)
+        parser_advance(p)
+        declare name_tok: Token = parser_expect(p, TokenKind::Identifier)
+        declare node: ptr<AstNode> = pool_get_node(address_of(dereference(p).pool), node_idx)
+        dereference(node).name_start = name_tok.start
+        dereference(node).name_length = name_tok.length
+        dereference(node).line = name_tok.line
+        parser_expect(p, TokenKind::Colon)
+        declare var_type: u32 = parse_type(p)
+        dereference(node).type_node = var_type
+        if (parser_match(p, TokenKind::Assign)) {
+            declare init_expr: u32 = parse_expression(p, 0)
+            node_add_child(address_of(dereference(p).pool), node_idx, init_expr)
+        }
+        return node_idx
+    }
+
+    § return expr
+    if (kind == TokenKind::KwReturn) {
+        declare node_idx: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::ReturnStmt)
+        parser_advance(p)
+        if (parser_peek_kind(p) != TokenKind::RightBrace && parser_peek_kind(p) != TokenKind::EndOfFile) {
+            declare ret_expr: u32 = parse_expression(p, 0)
+            node_add_child(address_of(dereference(p).pool), node_idx, ret_expr)
+        }
+        return node_idx
+    }
+
+    § if (condition) { ... } else { ... }
+    if (kind == TokenKind::KwIf) {
+        declare node_idx: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::IfStmt)
+        parser_advance(p)
+        parser_expect(p, TokenKind::LeftParen)
+        declare cond: u32 = parse_expression(p, 0)
+        parser_expect(p, TokenKind::RightParen)
+        declare then_block: u32 = parse_block(p)
+        node_add_child(address_of(dereference(p).pool), node_idx, cond)
+        node_add_child(address_of(dereference(p).pool), node_idx, then_block)
+        if (parser_match(p, TokenKind::KwElse)) {
+            if (parser_peek_kind(p) == TokenKind::KwIf) {
+                declare else_if: u32 = parse_statement(p)
+                node_add_child(address_of(dereference(p).pool), node_idx, else_if)
+            } else {
+                declare else_block: u32 = parse_block(p)
+                node_add_child(address_of(dereference(p).pool), node_idx, else_block)
+            }
+        }
+        return node_idx
+    }
+
+    § while (condition) { ... }
+    if (kind == TokenKind::KwWhile) {
+        declare node_idx: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::WhileStmt)
+        parser_advance(p)
+        parser_expect(p, TokenKind::LeftParen)
+        declare cond: u32 = parse_expression(p, 0)
+        parser_expect(p, TokenKind::RightParen)
+        declare body: u32 = parse_block(p)
+        node_add_child(address_of(dereference(p).pool), node_idx, cond)
+        node_add_child(address_of(dereference(p).pool), node_idx, body)
+        return node_idx
+    }
+
+    § for (init; cond; update) { ... }
+    if (kind == TokenKind::KwFor) {
+        declare node_idx: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::ForStmt)
+        parser_advance(p)
+        parser_expect(p, TokenKind::LeftParen)
+        declare init_stmt: u32 = parse_statement(p)
+        parser_expect(p, TokenKind::Semicolon)
+        declare cond: u32 = parse_expression(p, 0)
+        parser_expect(p, TokenKind::Semicolon)
+        declare update: u32 = parse_expression(p, 0)
+        parser_expect(p, TokenKind::RightParen)
+        declare body: u32 = parse_block(p)
+        node_add_child(address_of(dereference(p).pool), node_idx, init_stmt)
+        node_add_child(address_of(dereference(p).pool), node_idx, cond)
+        node_add_child(address_of(dereference(p).pool), node_idx, update)
+        node_add_child(address_of(dereference(p).pool), node_idx, body)
+        return node_idx
+    }
+
+    § loop { ... }
+    if (kind == TokenKind::KwLoop) {
+        declare node_idx: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::LoopStmt)
+        parser_advance(p)
+        declare body: u32 = parse_block(p)
+        node_add_child(address_of(dereference(p).pool), node_idx, body)
+        return node_idx
+    }
+
+    § break
+    if (kind == TokenKind::KwBreak) {
+        declare node_idx: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::BreakStmt)
+        parser_advance(p)
+        return node_idx
+    }
+
+    § continue
+    if (kind == TokenKind::KwContinue) {
+        declare node_idx: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::ContinueStmt)
+        parser_advance(p)
+        return node_idx
+    }
+
+    § switch (expr) { case N: ... }
+    if (kind == TokenKind::KwSwitch) {
+        declare node_idx: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::SwitchStmt)
+        parser_advance(p)
+        parser_expect(p, TokenKind::LeftParen)
+        declare switch_expr: u32 = parse_expression(p, 0)
+        parser_expect(p, TokenKind::RightParen)
+        parser_expect(p, TokenKind::LeftBrace)
+        node_add_child(address_of(dereference(p).pool), node_idx, switch_expr)
+        while (parser_peek_kind(p) != TokenKind::RightBrace) {
+            if (parser_peek_kind(p) == TokenKind::KwCase) {
+                declare case_node: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::CaseClause)
+                parser_advance(p)
+                declare case_val: u32 = parse_expression(p, 0)
+                parser_expect(p, TokenKind::Colon)
+                node_add_child(address_of(dereference(p).pool), case_node, case_val)
+                while (parser_peek_kind(p) != TokenKind::KwCase && parser_peek_kind(p) != TokenKind::KwDefault && parser_peek_kind(p) != TokenKind::RightBrace) {
+                    declare case_stmt: u32 = parse_statement(p)
+                    node_add_child(address_of(dereference(p).pool), case_node, case_stmt)
+                }
+                node_add_child(address_of(dereference(p).pool), node_idx, case_node)
+            } else if (parser_peek_kind(p) == TokenKind::KwDefault) {
+                declare def_node: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::DefaultClause)
+                parser_advance(p)
+                parser_expect(p, TokenKind::Colon)
+                while (parser_peek_kind(p) != TokenKind::RightBrace) {
+                    declare def_stmt: u32 = parse_statement(p)
+                    node_add_child(address_of(dereference(p).pool), def_node, def_stmt)
+                }
+                node_add_child(address_of(dereference(p).pool), node_idx, def_node)
+            } else {
+                parser_advance(p)  § skip unexpected token
+            }
+        }
+        parser_expect(p, TokenKind::RightBrace)
+        return node_idx
+    }
+
+    § assembly { ... }
+    if (kind == TokenKind::KwAssembly) {
+        declare node_idx: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::AssemblyStmt)
+        parser_advance(p)
+        parser_expect(p, TokenKind::LeftBrace)
+        § Collect assembly strings
+        while (parser_peek_kind(p) != TokenKind::RightBrace) {
+            declare asm_tok: Token = parser_expect(p, TokenKind::StringLiteral)
+            declare asm_child: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::StringLiteral)
+            declare asn: ptr<AstNode> = pool_get_node(address_of(dereference(p).pool), asm_child)
+            dereference(asn).token_start = asm_tok.start
+            dereference(asn).token_length = asm_tok.length
+            node_add_child(address_of(dereference(p).pool), node_idx, asm_child)
+        }
+        parser_expect(p, TokenKind::RightBrace)
+        return node_idx
+    }
+
+    § Block
+    if (kind == TokenKind::LeftBrace) {
+        return parse_block(p)
+    }
+
+    § Expression statement (assignment or function call)
+    declare expr: u32 = parse_expression(p, 0)
+
+    § Check for assignment operators
+    declare assign_kind: TokenKind = parser_peek_kind(p)
+    if (assign_kind == TokenKind::Assign || assign_kind == TokenKind::PlusAssign ||
+        assign_kind == TokenKind::MinusAssign || assign_kind == TokenKind::StarAssign ||
+        assign_kind == TokenKind::SlashAssign) {
+        declare assign_node: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::AssignStmt)
+        declare op: Token = parser_advance(p)
+        declare rhs: u32 = parse_expression(p, 0)
+        declare an: ptr<AstNode> = pool_get_node(address_of(dereference(p).pool), assign_node)
+        dereference(an).token_start = op.start
+        dereference(an).token_length = op.length
+        node_add_child(address_of(dereference(p).pool), assign_node, expr)
+        node_add_child(address_of(dereference(p).pool), assign_node, rhs)
+        return assign_node
+    }
+
+    § Plain expression statement
+    declare expr_stmt: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::ExprStmt)
+    node_add_child(address_of(dereference(p).pool), expr_stmt, expr)
+    return expr_stmt
+}
+
+§ --- Top-Level Declaration Parsing ---
+
+function parse_function(p: ptr<Parser>, is_external: bool): u32 {
+    declare nk: NodeKind = NodeKind::FunctionDecl
+    if (is_external) { nk = NodeKind::ExternalFuncDecl }
+    declare node_idx: u32 = pool_alloc_node(address_of(dereference(p).pool), nk)
+    declare node: ptr<AstNode> = pool_get_node(address_of(dereference(p).pool), node_idx)
+    dereference(node).is_external = is_external
+
+    parser_expect(p, TokenKind::KwFunction)
+    declare name_tok: Token = parser_expect(p, TokenKind::Identifier)
+    dereference(node).name_start = name_tok.start
+    dereference(node).name_length = name_tok.length
+    dereference(node).line = name_tok.line
+
+    § Parameters
+    parser_expect(p, TokenKind::LeftParen)
+    while (parser_peek_kind(p) != TokenKind::RightParen) {
+        declare param_node: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::Parameter)
+        declare param_name: Token = parser_expect(p, TokenKind::Identifier)
+        declare pn: ptr<AstNode> = pool_get_node(address_of(dereference(p).pool), param_node)
+        dereference(pn).name_start = param_name.start
+        dereference(pn).name_length = param_name.length
+        parser_expect(p, TokenKind::Colon)
+        declare param_type: u32 = parse_type(p)
+        dereference(pn).type_node = param_type
+        node_add_child(address_of(dereference(p).pool), node_idx, param_node)
+        if (!parser_match(p, TokenKind::Comma)) { break }
+    }
+    parser_expect(p, TokenKind::RightParen)
+
+    § Return type
+    parser_expect(p, TokenKind::Colon)
+    declare ret_type: u32 = parse_type(p)
+    dereference(node).type_node = ret_type
+
+    § Body (only for non-external functions)
+    if (!is_external) {
+        declare body: u32 = parse_block(p)
+        node_add_child(address_of(dereference(p).pool), node_idx, body)
+    }
+
+    return node_idx
+}
+
+function parse_structure(p: ptr<Parser>): u32 {
+    declare node_idx: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::StructureDecl)
+    parser_expect(p, TokenKind::KwStructure)
+    declare name_tok: Token = parser_expect(p, TokenKind::Identifier)
+    declare node: ptr<AstNode> = pool_get_node(address_of(dereference(p).pool), node_idx)
+    dereference(node).name_start = name_tok.start
+    dereference(node).name_length = name_tok.length
+    dereference(node).line = name_tok.line
+    parser_expect(p, TokenKind::LeftBrace)
+    while (parser_peek_kind(p) != TokenKind::RightBrace) {
+        declare field_node: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::StructField)
+        declare field_name: Token = parser_expect(p, TokenKind::Identifier)
+        declare fn_node: ptr<AstNode> = pool_get_node(address_of(dereference(p).pool), field_node)
+        dereference(fn_node).name_start = field_name.start
+        dereference(fn_node).name_length = field_name.length
+        parser_expect(p, TokenKind::Colon)
+        declare field_type: u32 = parse_type(p)
+        dereference(fn_node).type_node = field_type
+        node_add_child(address_of(dereference(p).pool), node_idx, field_node)
+        parser_match(p, TokenKind::Comma)
+    }
+    parser_expect(p, TokenKind::RightBrace)
+    return node_idx
+}
+
+function parse_enumeration(p: ptr<Parser>): u32 {
+    declare node_idx: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::EnumerationDecl)
+    parser_expect(p, TokenKind::KwEnumeration)
+    declare name_tok: Token = parser_expect(p, TokenKind::Identifier)
+    declare node: ptr<AstNode> = pool_get_node(address_of(dereference(p).pool), node_idx)
+    dereference(node).name_start = name_tok.start
+    dereference(node).name_length = name_tok.length
+    dereference(node).line = name_tok.line
+    parser_expect(p, TokenKind::LeftBrace)
+    while (parser_peek_kind(p) != TokenKind::RightBrace) {
+        declare variant_node: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::EnumVariant)
+        declare variant_name: Token = parser_expect(p, TokenKind::Identifier)
+        declare vn: ptr<AstNode> = pool_get_node(address_of(dereference(p).pool), variant_node)
+        dereference(vn).name_start = variant_name.start
+        dereference(vn).name_length = variant_name.length
+        if (parser_match(p, TokenKind::Assign)) {
+            declare val_expr: u32 = parse_expression(p, 0)
+            node_add_child(address_of(dereference(p).pool), variant_node, val_expr)
+        }
+        node_add_child(address_of(dereference(p).pool), node_idx, variant_node)
+        parser_match(p, TokenKind::Comma)
+    }
+    parser_expect(p, TokenKind::RightBrace)
+    return node_idx
+}
+
+§ --- Program Parsing (Entry Point) ---
+
+function parse_program(p: ptr<Parser>): u32 {
+    declare program: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::Program)
+
+    while (parser_peek_kind(p) != TokenKind::EndOfFile) {
+        declare kind: TokenKind = parser_peek_kind(p)
+
+        § constant name: Type = expr
+        if (kind == TokenKind::KwConstant) {
+            declare const_node: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::ConstantDecl)
+            parser_advance(p)
+            declare cname: Token = parser_expect(p, TokenKind::Identifier)
+            declare cn: ptr<AstNode> = pool_get_node(address_of(dereference(p).pool), const_node)
+            dereference(cn).name_start = cname.start
+            dereference(cn).name_length = cname.length
+            parser_expect(p, TokenKind::Colon)
+            declare ctype: u32 = parse_type(p)
+            dereference(cn).type_node = ctype
+            parser_expect(p, TokenKind::Assign)
+            declare cval: u32 = parse_expression(p, 0)
+            node_add_child(address_of(dereference(p).pool), const_node, cval)
+            node_add_child(address_of(dereference(p).pool), program, const_node)
+            continue
+        }
+
+        § external function ...
+        if (kind == TokenKind::KwExternal) {
+            parser_advance(p)
+            declare ext_func: u32 = parse_function(p, true)
+            node_add_child(address_of(dereference(p).pool), program, ext_func)
+            continue
+        }
+
+        § function ...
+        if (kind == TokenKind::KwFunction) {
+            declare func: u32 = parse_function(p, false)
+            node_add_child(address_of(dereference(p).pool), program, func)
+            continue
+        }
+
+        § structure ...
+        if (kind == TokenKind::KwStructure) {
+            declare struct_decl: u32 = parse_structure(p)
+            node_add_child(address_of(dereference(p).pool), program, struct_decl)
+            continue
+        }
+
+        § enumeration ...
+        if (kind == TokenKind::KwEnumeration) {
+            declare enum_decl: u32 = parse_enumeration(p)
+            node_add_child(address_of(dereference(p).pool), program, enum_decl)
+            continue
+        }
+
+        § when platform == "..." { ... }
+        if (kind == TokenKind::KwWhen) {
+            declare when_node: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::WhenBlock)
+            parser_advance(p)
+            § Parse: platform == "..."
+            declare cond_expr: u32 = parse_expression(p, 0)
+            node_add_child(address_of(dereference(p).pool), when_node, cond_expr)
+            parser_expect(p, TokenKind::LeftBrace)
+            while (parser_peek_kind(p) != TokenKind::RightBrace && parser_peek_kind(p) != TokenKind::EndOfFile) {
+                § Recursively parse top-level declarations inside when block
+                declare inner_kind: TokenKind = parser_peek_kind(p)
+                if (inner_kind == TokenKind::KwFunction) {
+                    declare wf: u32 = parse_function(p, false)
+                    node_add_child(address_of(dereference(p).pool), when_node, wf)
+                } else if (inner_kind == TokenKind::KwExternal) {
+                    parser_advance(p)
+                    declare we: u32 = parse_function(p, true)
+                    node_add_child(address_of(dereference(p).pool), when_node, we)
+                } else {
+                    parser_advance(p)  § skip unexpected
+                }
+            }
+            parser_expect(p, TokenKind::RightBrace)
+            node_add_child(address_of(dereference(p).pool), program, when_node)
+            continue
+        }
+
+        § directive ...
+        if (kind == TokenKind::KwDirective) {
+            declare dir_node: u32 = pool_alloc_node(address_of(dereference(p).pool), NodeKind::DirectiveDecl)
+            parser_advance(p)
+            declare dir_name: Token = parser_expect(p, TokenKind::Identifier)
+            declare dn: ptr<AstNode> = pool_get_node(address_of(dereference(p).pool), dir_node)
+            dereference(dn).name_start = dir_name.start
+            dereference(dn).name_length = dir_name.length
+            node_add_child(address_of(dereference(p).pool), program, dir_node)
+            continue
+        }
+
+        § Unknown: skip
+        parser_advance(p)
+    }
+
+    return program
+}

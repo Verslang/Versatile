@@ -1,0 +1,10 @@
+// Versatile Suite Installer — Embedded Binary Resources
+// These executables are packaged inside the installer and extracted at install time.
+
+// Resource IDs (must match the #defines in versatile-installer.cpp)
+#define IDR_VERSLANG_EXE  101
+#define IDR_VERSS_EXE     102
+
+// Embed the binaries as RCDATA resources
+IDR_VERSLANG_EXE  RCDATA  "..\\..\\Verslang\\build\\verslang.exe"
+IDR_VERSS_EXE     RCDATA  "..\\..\\Versscript\\build\\verss.exe"

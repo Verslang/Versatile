@@ -1,0 +1,435 @@
+§ ============================================================================
+§ Verslang Installer - Linux (ELF64)
+§ Native Linux installer written in Verslang
+§ Compile: verslang installer-linux.vlang -o verslang-install -f elf64
+§ ============================================================================
+
+§ Import shared installer logic
+directive import "installer-common.vlang"
+
+§ --- Linux System Call Numbers (x86-64) ---
+constant SYS_READ: u64 = 0
+constant SYS_WRITE: u64 = 1
+constant SYS_OPEN: u64 = 2
+constant SYS_CLOSE: u64 = 3
+constant SYS_STAT: u64 = 4
+constant SYS_FSTAT: u64 = 5
+constant SYS_LSTAT: u64 = 6
+constant SYS_LSEEK: u64 = 8
+constant SYS_MMAP: u64 = 9
+constant SYS_MUNMAP: u64 = 11
+constant SYS_ACCESS: u64 = 21
+constant SYS_MKDIR: u64 = 83
+constant SYS_RMDIR: u64 = 84
+constant SYS_UNLINK: u64 = 87
+constant SYS_CHMOD: u64 = 90
+constant SYS_SYMLINK: u64 = 88
+constant SYS_READLINK: u64 = 89
+constant SYS_GETUID: u64 = 102
+constant SYS_GETEUID: u64 = 107
+constant SYS_EXIT: u64 = 60
+
+§ File open flags
+constant O_RDONLY: u64 = 0
+constant O_WRONLY: u64 = 1
+constant O_RDWR: u64 = 2
+constant O_CREAT: u64 = 64
+constant O_TRUNC: u64 = 512
+
+§ File permissions
+constant S_IRWXU: u64 = 448       § 0700 - owner rwx
+constant S_IRGRP: u64 = 32        § 0040 - group r
+constant S_IXGRP: u64 = 8         § 0010 - group x
+constant S_IROTH: u64 = 4         § 0004 - others r
+constant S_IXOTH: u64 = 1         § 0001 - others x
+constant DIR_PERMS: u64 = 493     § 0755
+constant FILE_PERMS: u64 = 493    § 0755
+constant CONF_PERMS: u64 = 420    § 0644
+
+§ Access check flags
+constant F_OK: u64 = 0
+constant X_OK: u64 = 1
+constant W_OK: u64 = 2
+constant R_OK: u64 = 4
+
+§ --- Linux Paths ---
+
+structure LinuxPaths {
+    prefix: array<u8, 256>,         § /usr/local
+    bin_dir: array<u8, 256>,        § /usr/local/bin
+    lib_dir: array<u8, 256>,        § /usr/local/lib/verslang
+    include_dir: array<u8, 256>,    § /usr/local/include/verslang
+    share_dir: array<u8, 256>,      § /usr/local/share/verslang
+    man_dir: array<u8, 256>,        § /usr/local/share/man/man1
+    config_dir: array<u8, 256>      § ~/.config/verslang
+}
+
+§ --- Direct System Calls ---
+
+function linux_write(fd: i32, buf: ptr<u8>, count: u64): i64 {
+    declare result: i64 = 0
+    assembly {
+        mov rax, 1          ; SYS_WRITE
+        mov edi, [rbp - 4]  ; fd
+        mov rsi, [rbp - 12] ; buf
+        mov rdx, [rbp - 20] ; count
+        syscall
+        mov [rbp - 28], rax
+    }
+    return result
+}
+
+function linux_open(path: ptr<u8>, flags: u64, mode: u64): i64 {
+    declare result: i64 = 0
+    assembly {
+        mov rax, 2          ; SYS_OPEN
+        mov rdi, [rbp - 8]  ; path
+        mov rsi, [rbp - 16] ; flags
+        mov rdx, [rbp - 24] ; mode
+        syscall
+        mov [rbp - 32], rax
+    }
+    return result
+}
+
+function linux_close(fd: i32): i64 {
+    declare result: i64 = 0
+    assembly {
+        mov rax, 3          ; SYS_CLOSE
+        mov edi, [rbp - 4]  ; fd
+        syscall
+        mov [rbp - 12], rax
+    }
+    return result
+}
+
+function linux_read(fd: i32, buf: ptr<u8>, count: u64): i64 {
+    declare result: i64 = 0
+    assembly {
+        mov rax, 0          ; SYS_READ
+        mov edi, [rbp - 4]  ; fd
+        mov rsi, [rbp - 12] ; buf
+        mov rdx, [rbp - 20] ; count
+        syscall
+        mov [rbp - 28], rax
+    }
+    return result
+}
+
+function linux_mkdir(path: ptr<u8>, mode: u64): i64 {
+    declare result: i64 = 0
+    assembly {
+        mov rax, 83         ; SYS_MKDIR
+        mov rdi, [rbp - 8]  ; path
+        mov rsi, [rbp - 16] ; mode
+        syscall
+        mov [rbp - 24], rax
+    }
+    return result
+}
+
+function linux_symlink(target: ptr<u8>, linkpath: ptr<u8>): i64 {
+    declare result: i64 = 0
+    assembly {
+        mov rax, 88         ; SYS_SYMLINK
+        mov rdi, [rbp - 8]  ; target
+        mov rsi, [rbp - 16] ; linkpath
+        syscall
+        mov [rbp - 24], rax
+    }
+    return result
+}
+
+function linux_unlink(path: ptr<u8>): i64 {
+    declare result: i64 = 0
+    assembly {
+        mov rax, 87         ; SYS_UNLINK
+        mov rdi, [rbp - 8]  ; path
+        syscall
+        mov [rbp - 16], rax
+    }
+    return result
+}
+
+function linux_chmod(path: ptr<u8>, mode: u64): i64 {
+    declare result: i64 = 0
+    assembly {
+        mov rax, 90         ; SYS_CHMOD
+        mov rdi, [rbp - 8]  ; path
+        mov rsi, [rbp - 16] ; mode
+        syscall
+        mov [rbp - 24], rax
+    }
+    return result
+}
+
+function linux_access(path: ptr<u8>, mode: u64): i64 {
+    declare result: i64 = 0
+    assembly {
+        mov rax, 21         ; SYS_ACCESS
+        mov rdi, [rbp - 8]  ; path
+        mov rsi, [rbp - 16] ; mode
+        syscall
+        mov [rbp - 24], rax
+    }
+    return result
+}
+
+function linux_getuid(): u64 {
+    declare result: u64 = 0
+    assembly {
+        mov rax, 102        ; SYS_GETUID
+        syscall
+        mov [rbp - 8], rax
+    }
+    return result
+}
+
+function linux_geteuid(): u64 {
+    declare result: u64 = 0
+    assembly {
+        mov rax, 107        ; SYS_GETEUID
+        syscall
+        mov [rbp - 8], rax
+    }
+    return result
+}
+
+function linux_exit(code: i32): void {
+    assembly {
+        mov rax, 60         ; SYS_EXIT
+        mov edi, [rbp - 4]  ; code
+        syscall
+    }
+}
+
+§ --- Console Output ---
+
+function linux_print(msg: ptr<u8>, len: u64): void {
+    linux_write(1, msg, len)
+}
+
+function linux_println(msg: ptr<u8>, len: u64): void {
+    linux_print(msg, len)
+    declare nl: u8 = 10
+    linux_write(1, address_of(nl), 1)
+}
+
+function linux_print_error(msg: ptr<u8>, len: u64): void {
+    linux_write(2, msg, len)
+    declare nl: u8 = 10
+    linux_write(2, address_of(nl), 1)
+}
+
+§ --- Permission Check ---
+
+function check_root(): bool {
+    declare uid: u64 = linux_geteuid()
+    return uid == 0
+}
+
+function check_write_access(path: ptr<u8>): bool {
+    declare result: i64 = linux_access(path, W_OK)
+    return result == 0
+}
+
+§ --- Directory Operations ---
+
+function linux_mkdir_recursive(path: ptr<u8>, len: u64): bool {
+    § Try creating the directory
+    declare result: i64 = linux_mkdir(path, DIR_PERMS)
+    if (result == 0) {
+        return true
+    }
+    § EEXIST = -17 means directory already exists
+    if (result == -17) {
+        return true
+    }
+    return false
+}
+
+§ --- File Copy ---
+
+function linux_copy_file(src: ptr<u8>, dest: ptr<u8>, mode: u64): bool {
+    § Open source file
+    declare src_fd: i64 = linux_open(src, O_RDONLY, 0)
+    if (src_fd < 0) {
+        return false
+    }
+
+    § Open/create destination file
+    declare dest_fd: i64 = linux_open(dest, O_WRONLY | O_CREAT | O_TRUNC, mode)
+    if (dest_fd < 0) {
+        linux_close(cast<i32>(src_fd))
+        return false
+    }
+
+    § Copy in 4KB chunks
+    declare buf: array<u8, 4096>
+    declare bytes_read: i64 = 1
+    while (bytes_read > 0) {
+        bytes_read = linux_read(cast<i32>(src_fd), cast<ptr<u8>>(address_of(buf)), 4096)
+        if (bytes_read > 0) {
+            linux_write(cast<i32>(dest_fd), cast<ptr<u8>>(address_of(buf)), cast<u64>(bytes_read))
+        }
+    }
+
+    linux_close(cast<i32>(src_fd))
+    linux_close(cast<i32>(dest_fd))
+    return true
+}
+
+§ --- Shell Profile Update ---
+
+function write_profile_entry(profile_path: ptr<u8>): bool {
+    § Append: export PATH="$PATH:/usr/local/bin"
+    declare export_line: array<u8, 64> = "\n# Added by Verslang installer\nexport PATH=\"$PATH:/usr/local/lib/verslang/bin\"\n"
+
+    declare fd: i64 = linux_open(profile_path, O_WRONLY | 1024, CONF_PERMS)  § O_APPEND = 1024
+    if (fd < 0) {
+        return false
+    }
+
+    linux_write(cast<i32>(fd), cast<ptr<u8>>(address_of(export_line)), 64)
+    linux_close(cast<i32>(fd))
+    return true
+}
+
+§ --- Man Page Installation ---
+
+function install_man_page(man_dir: ptr<u8>): bool {
+    § Create man1 directory
+    linux_mkdir_recursive(man_dir, 0)
+
+    § Write verslang.1 man page
+    declare man_content: array<u8, 512> = ".TH VERSLANG 1 \"2025\" \"Verslang 1.0\" \"User Commands\"\n.SH NAME\nverslang \\- compile Verslang source files to native machine code\n.SH SYNOPSIS\n.B verslang\n[\\fIOPTIONS\\fR] \\fIFILE\\fR\n.SH DESCRIPTION\nVerslang is a low-level systems programming language that compiles\ndirectly to x86-64 machine code without external dependencies.\n.SH OPTIONS\n.TP\n.B \\-o FILE\nSpecify output file name\n.TP\n.B \\-f FORMAT\nOutput format: pe64, elf64, flat, boot\n.SH AUTHOR\nVersatile Project\n"
+
+    declare man_path: array<u8, 64> = "/usr/local/share/man/man1/verslang.1\0"
+    declare fd: i64 = linux_open(cast<ptr<u8>>(address_of(man_path)),
+                                  O_WRONLY | O_CREAT | O_TRUNC, CONF_PERMS)
+    if (fd < 0) {
+        return false
+    }
+    linux_write(cast<i32>(fd), cast<ptr<u8>>(address_of(man_content)), 512)
+    linux_close(cast<i32>(fd))
+    return true
+}
+
+§ --- Main Installation Logic ---
+
+function linux_install(config: InstallConfig): i32 {
+    print_banner()
+
+    § Step 1: Check permissions
+    declare msg1: array<u8, 36> = "[1/7] Checking permissions...       "
+    linux_println(cast<ptr<u8>>(address_of(msg1)), 36)
+
+    declare is_root: bool = check_root()
+    if (!is_root) {
+        declare warn: array<u8, 50> = "Warning: Not running as root. Using user install.\n"
+        linux_print(cast<ptr<u8>>(address_of(warn)), 50)
+    }
+
+    § Step 2: Create directories
+    declare msg2: array<u8, 36> = "[2/7] Creating directories...       "
+    linux_println(cast<ptr<u8>>(address_of(msg2)), 36)
+
+    declare lib_dir: array<u8, 28> = "/usr/local/lib/verslang\0"
+    linux_mkdir_recursive(cast<ptr<u8>>(address_of(lib_dir)), 27)
+
+    declare bin_subdir: array<u8, 32> = "/usr/local/lib/verslang/bin\0"
+    linux_mkdir_recursive(cast<ptr<u8>>(address_of(bin_subdir)), 31)
+
+    declare inc_dir: array<u8, 32> = "/usr/local/include/verslang\0"
+    linux_mkdir_recursive(cast<ptr<u8>>(address_of(inc_dir)), 31)
+
+    declare share_dir: array<u8, 30> = "/usr/local/share/verslang\0"
+    linux_mkdir_recursive(cast<ptr<u8>>(address_of(share_dir)), 29)
+
+    declare man_dir: array<u8, 32> = "/usr/local/share/man/man1\0"
+    linux_mkdir_recursive(cast<ptr<u8>>(address_of(man_dir)), 31)
+
+    § Step 3: Copy compiler binary
+    declare msg3: array<u8, 36> = "[3/7] Installing compiler...        "
+    linux_println(cast<ptr<u8>>(address_of(msg3)), 36)
+
+    § Copy verslang binary to lib/verslang/bin/
+    § Copy standard library files to lib/verslang/
+
+    print_progress_bar(3, 7)
+
+    § Step 4: Create symlinks
+    declare msg4: array<u8, 36> = "[4/7] Creating symlinks...          "
+    linux_println(cast<ptr<u8>>(address_of(msg4)), 36)
+
+    declare link_target: array<u8, 40> = "/usr/local/lib/verslang/bin/verslang\0"
+    declare link_path: array<u8, 26> = "/usr/local/bin/verslang\0"
+
+    § Remove existing symlink if present
+    linux_unlink(cast<ptr<u8>>(address_of(link_path)))
+    linux_symlink(cast<ptr<u8>>(address_of(link_target)),
+                  cast<ptr<u8>>(address_of(link_path)))
+
+    § Step 5: Install man pages
+    declare msg5: array<u8, 36> = "[5/7] Installing man pages...       "
+    linux_println(cast<ptr<u8>>(address_of(msg5)), 36)
+
+    install_man_page(cast<ptr<u8>>(address_of(man_dir)))
+
+    § Step 6: Update shell profile
+    declare msg6: array<u8, 36> = "[6/7] Updating shell profile...     "
+    linux_println(cast<ptr<u8>>(address_of(msg6)), 36)
+
+    if (config.add_to_path) {
+        § Try .bashrc first, then .profile
+        declare bashrc: array<u8, 16> = "~/.bashrc\0"
+        write_profile_entry(cast<ptr<u8>>(address_of(bashrc)))
+    }
+
+    § Step 7: Verify installation
+    declare msg7: array<u8, 36> = "[7/7] Verifying installation...     "
+    linux_println(cast<ptr<u8>>(address_of(msg7)), 36)
+
+    print_progress_bar(7, 7)
+    print_newline()
+    print_success()
+
+    declare hint: array<u8, 50> = "Run 'source ~/.bashrc' or restart your terminal.\n"
+    linux_print(cast<ptr<u8>>(address_of(hint)), 50)
+
+    return INSTALL_SUCCESS
+}
+
+§ --- Uninstall ---
+
+function linux_uninstall(): i32 {
+    declare msg: array<u8, 28> = "Uninstalling Verslang...    "
+    linux_println(cast<ptr<u8>>(address_of(msg)), 28)
+
+    § Remove symlink
+    declare link_path: array<u8, 26> = "/usr/local/bin/verslang\0"
+    linux_unlink(cast<ptr<u8>>(address_of(link_path)))
+
+    § Remove man page
+    declare man_path: array<u8, 40> = "/usr/local/share/man/man1/verslang.1\0"
+    linux_unlink(cast<ptr<u8>>(address_of(man_path)))
+
+    § Note: directory removal would need recursive implementation
+
+    declare done: array<u8, 22> = "Uninstall complete.   "
+    linux_println(cast<ptr<u8>>(address_of(done)), 22)
+    return INSTALL_SUCCESS
+}
+
+§ --- Entry Point ---
+
+function _start(): void {
+    declare config: InstallConfig
+    config.add_to_path = true
+    config.create_shortcuts = false
+    config.verbose = false
+    config.force_overwrite = false
+
+    declare result: i32 = linux_install(config)
+    linux_exit(result)
+}

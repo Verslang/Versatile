@@ -1,0 +1,617 @@
+§ ============================================================================
+§ Verslang Bootstrap Compiler: Lexer
+§ A tokenizer for Verslang source code, written in Verslang itself
+§ This is the first stage of the self-hosting bootstrap compiler
+§ Compile: verslang lexer.vlang -o lexer.o -f obj
+§ ============================================================================
+
+§ --- Token Types ---
+
+enumeration TokenKind {
+    § Literals
+    IntegerLiteral = 0,
+    FloatLiteral = 1,
+    StringLiteral = 2,
+    CharLiteral = 3,
+    HexLiteral = 4,
+    BinaryLiteral = 5,
+
+    § Identifiers and keywords
+    Identifier = 10,
+    KwDeclare = 11,
+    KwConstant = 12,
+    KwMutable = 13,
+    KwFunction = 14,
+    KwExternal = 15,
+    KwReturn = 16,
+    KwIf = 17,
+    KwElse = 18,
+    KwWhile = 19,
+    KwFor = 20,
+    KwLoop = 21,
+    KwBreak = 22,
+    KwContinue = 23,
+    KwSwitch = 24,
+    KwCase = 25,
+    KwDefault = 26,
+    KwStructure = 27,
+    KwEnumeration = 28,
+    KwUnion = 29,
+    KwBitfield = 30,
+    KwAssembly = 31,
+    KwSyscall = 32,
+    KwCast = 33,
+    KwBitcast = 34,
+    KwSizeof = 35,
+    KwAlignof = 36,
+    KwAddress_of = 37,
+    KwDereference = 38,
+    KwDirective = 39,
+    KwWhen = 40,
+    KwTrue = 41,
+    KwFalse = 42,
+    KwPtr = 43,
+    KwArray = 44,
+
+    § Type keywords
+    KwU8 = 50,
+    KwU16 = 51,
+    KwU32 = 52,
+    KwU64 = 53,
+    KwI8 = 54,
+    KwI16 = 55,
+    KwI32 = 56,
+    KwI64 = 57,
+    KwF32 = 58,
+    KwF64 = 59,
+    KwBool = 60,
+    KwVoid = 61,
+    KwChar = 62,
+    KwUsize = 63,
+    KwIsize = 64,
+
+    § Operators
+    Plus = 100,
+    Minus = 101,
+    Star = 102,
+    Slash = 103,
+    Percent = 104,
+    Ampersand = 105,
+    Pipe = 106,
+    Caret = 107,
+    Tilde = 108,
+    Bang = 109,
+    Assign = 110,
+    Less = 111,
+    Greater = 112,
+    Dot = 113,
+
+    § Multi-character operators
+    EqualEqual = 120,
+    BangEqual = 121,
+    LessEqual = 122,
+    GreaterEqual = 123,
+    AmpAmp = 124,
+    PipePipe = 125,
+    ShiftLeft = 126,
+    ShiftRight = 127,
+    PlusAssign = 128,
+    MinusAssign = 129,
+    StarAssign = 130,
+    SlashAssign = 131,
+    ColonColon = 132,
+    Arrow = 133,
+
+    § Delimiters
+    LeftParen = 140,
+    RightParen = 141,
+    LeftBrace = 142,
+    RightBrace = 143,
+    LeftBracket = 144,
+    RightBracket = 145,
+    Semicolon = 146,
+    Colon = 147,
+    Comma = 148,
+
+    § Special
+    EndOfFile = 200,
+    Error = 201
+}
+
+§ --- Token Structure ---
+
+structure Token {
+    kind: TokenKind,
+    start: u64,
+    length: u64,
+    line: u32,
+    column: u32
+}
+
+§ --- Lexer State ---
+
+structure Lexer {
+    source: ptr<u8>,
+    source_length: u64,
+    position: u64,
+    line: u32,
+    column: u32,
+    token_count: u32,
+    error_count: u32
+}
+
+§ --- Character Classification ---
+
+function is_alpha(c: u8): bool {
+    return (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95
+}
+
+function is_digit(c: u8): bool {
+    return c >= 48 && c <= 57
+}
+
+function is_hex_digit(c: u8): bool {
+    return (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102)
+}
+
+function is_alnum(c: u8): bool {
+    return is_alpha(c) || is_digit(c)
+}
+
+function is_whitespace(c: u8): bool {
+    return c == 32 || c == 9 || c == 13 || c == 10
+}
+
+§ --- Lexer Core ---
+
+function lexer_init(source: ptr<u8>, length: u64): Lexer {
+    declare lex: Lexer
+    lex.source = source
+    lex.source_length = length
+    lex.position = 0
+    lex.line = 1
+    lex.column = 1
+    lex.token_count = 0
+    lex.error_count = 0
+    return lex
+}
+
+function lexer_peek(lex: ptr<Lexer>): u8 {
+    if (dereference(lex).position >= dereference(lex).source_length) {
+        return 0
+    }
+    return dereference(cast<ptr<u8>>(
+        cast<u64>(dereference(lex).source) + dereference(lex).position
+    ))
+}
+
+function lexer_peek_at(lex: ptr<Lexer>, offset: u64): u8 {
+    declare pos: u64 = dereference(lex).position + offset
+    if (pos >= dereference(lex).source_length) {
+        return 0
+    }
+    return dereference(cast<ptr<u8>>(cast<u64>(dereference(lex).source) + pos))
+}
+
+function lexer_advance(lex: ptr<Lexer>): u8 {
+    declare c: u8 = lexer_peek(lex)
+    if (c == 0) { return 0 }
+
+    dereference(lex).position = dereference(lex).position + 1
+    if (c == 10) {
+        dereference(lex).line = dereference(lex).line + 1
+        dereference(lex).column = 1
+    } else {
+        dereference(lex).column = dereference(lex).column + 1
+    }
+    return c
+}
+
+§ --- Skip Whitespace and Comments ---
+
+function skip_whitespace_and_comments(lex: ptr<Lexer>): void {
+    loop {
+        declare c: u8 = lexer_peek(lex)
+
+        § Whitespace
+        if (is_whitespace(c)) {
+            lexer_advance(lex)
+            continue
+        }
+
+        § § comment (section sign, single-line)
+        if (c == 0xC2 && lexer_peek_at(lex, 1) == 0xA7) {
+            § UTF-8 § symbol is 0xC2 0xA7
+            while (lexer_peek(lex) != 10 && lexer_peek(lex) != 0) {
+                lexer_advance(lex)
+            }
+            continue
+        }
+
+        § // single-line comment
+        if (c == 47 && lexer_peek_at(lex, 1) == 47) {
+            while (lexer_peek(lex) != 10 && lexer_peek(lex) != 0) {
+                lexer_advance(lex)
+            }
+            continue
+        }
+
+        § /* block comment */
+        if (c == 47 && lexer_peek_at(lex, 1) == 42) {
+            lexer_advance(lex)  § skip /
+            lexer_advance(lex)  § skip *
+            declare depth: i32 = 1
+            while (depth > 0 && lexer_peek(lex) != 0) {
+                if (lexer_peek(lex) == 47 && lexer_peek_at(lex, 1) == 42) {
+                    lexer_advance(lex)
+                    lexer_advance(lex)
+                    depth = depth + 1
+                } else if (lexer_peek(lex) == 42 && lexer_peek_at(lex, 1) == 47) {
+                    lexer_advance(lex)
+                    lexer_advance(lex)
+                    depth = depth - 1
+                } else {
+                    lexer_advance(lex)
+                }
+            }
+            continue
+        }
+
+        § Not whitespace or comment
+        break
+    }
+}
+
+§ --- Keyword Matching ---
+
+function str_match(src: ptr<u8>, pos: u64, keyword: ptr<u8>, kw_len: u64): bool {
+    for (declare i: u64 = 0; i < kw_len; i = i + 1) {
+        declare sc: u8 = dereference(cast<ptr<u8>>(cast<u64>(src) + pos + i))
+        declare kc: u8 = dereference(cast<ptr<u8>>(cast<u64>(keyword) + i))
+        if (sc != kc) { return false }
+    }
+    return true
+}
+
+function match_keyword(src: ptr<u8>, start: u64, length: u64): TokenKind {
+    § Check keywords by length for efficiency
+    if (length == 2) {
+        if (str_match(src, start, cast<ptr<u8>>("if"), 2)) { return TokenKind::KwIf }
+        if (str_match(src, start, cast<ptr<u8>>("u8"), 2)) { return TokenKind::KwU8 }
+        if (str_match(src, start, cast<ptr<u8>>("i8"), 2)) { return TokenKind::KwI8 }
+    }
+    if (length == 3) {
+        if (str_match(src, start, cast<ptr<u8>>("for"), 3)) { return TokenKind::KwFor }
+        if (str_match(src, start, cast<ptr<u8>>("u16"), 3)) { return TokenKind::KwU16 }
+        if (str_match(src, start, cast<ptr<u8>>("u32"), 3)) { return TokenKind::KwU32 }
+        if (str_match(src, start, cast<ptr<u8>>("u64"), 3)) { return TokenKind::KwU64 }
+        if (str_match(src, start, cast<ptr<u8>>("i16"), 3)) { return TokenKind::KwI16 }
+        if (str_match(src, start, cast<ptr<u8>>("i32"), 3)) { return TokenKind::KwI32 }
+        if (str_match(src, start, cast<ptr<u8>>("i64"), 3)) { return TokenKind::KwI64 }
+        if (str_match(src, start, cast<ptr<u8>>("f32"), 3)) { return TokenKind::KwF32 }
+        if (str_match(src, start, cast<ptr<u8>>("f64"), 3)) { return TokenKind::KwF64 }
+        if (str_match(src, start, cast<ptr<u8>>("ptr"), 3)) { return TokenKind::KwPtr }
+    }
+    if (length == 4) {
+        if (str_match(src, start, cast<ptr<u8>>("else"), 4)) { return TokenKind::KwElse }
+        if (str_match(src, start, cast<ptr<u8>>("loop"), 4)) { return TokenKind::KwLoop }
+        if (str_match(src, start, cast<ptr<u8>>("case"), 4)) { return TokenKind::KwCase }
+        if (str_match(src, start, cast<ptr<u8>>("cast"), 4)) { return TokenKind::KwCast }
+        if (str_match(src, start, cast<ptr<u8>>("when"), 4)) { return TokenKind::KwWhen }
+        if (str_match(src, start, cast<ptr<u8>>("true"), 4)) { return TokenKind::KwTrue }
+        if (str_match(src, start, cast<ptr<u8>>("bool"), 4)) { return TokenKind::KwBool }
+        if (str_match(src, start, cast<ptr<u8>>("void"), 4)) { return TokenKind::KwVoid }
+        if (str_match(src, start, cast<ptr<u8>>("char"), 4)) { return TokenKind::KwChar }
+    }
+    if (length == 5) {
+        if (str_match(src, start, cast<ptr<u8>>("while"), 5)) { return TokenKind::KwWhile }
+        if (str_match(src, start, cast<ptr<u8>>("break"), 5)) { return TokenKind::KwBreak }
+        if (str_match(src, start, cast<ptr<u8>>("union"), 5)) { return TokenKind::KwUnion }
+        if (str_match(src, start, cast<ptr<u8>>("false"), 5)) { return TokenKind::KwFalse }
+        if (str_match(src, start, cast<ptr<u8>>("usize"), 5)) { return TokenKind::KwUsize }
+        if (str_match(src, start, cast<ptr<u8>>("isize"), 5)) { return TokenKind::KwIsize }
+        if (str_match(src, start, cast<ptr<u8>>("array"), 5)) { return TokenKind::KwArray }
+    }
+    if (length == 6) {
+        if (str_match(src, start, cast<ptr<u8>>("return"), 6)) { return TokenKind::KwReturn }
+        if (str_match(src, start, cast<ptr<u8>>("switch"), 6)) { return TokenKind::KwSwitch }
+        if (str_match(src, start, cast<ptr<u8>>("sizeof"), 6)) { return TokenKind::KwSizeof }
+    }
+    if (length == 7) {
+        if (str_match(src, start, cast<ptr<u8>>("declare"), 7)) { return TokenKind::KwDeclare }
+        if (str_match(src, start, cast<ptr<u8>>("mutable"), 7)) { return TokenKind::KwMutable }
+        if (str_match(src, start, cast<ptr<u8>>("default"), 7)) { return TokenKind::KwDefault }
+        if (str_match(src, start, cast<ptr<u8>>("bitcast"), 7)) { return TokenKind::KwBitcast }
+        if (str_match(src, start, cast<ptr<u8>>("alignof"), 7)) { return TokenKind::KwAlignof }
+        if (str_match(src, start, cast<ptr<u8>>("syscall"), 7)) { return TokenKind::KwSyscall }
+        if (str_match(src, start, cast<ptr<u8>>("bitfield"), 8)) { return TokenKind::KwBitfield }
+    }
+    if (length == 8) {
+        if (str_match(src, start, cast<ptr<u8>>("constant"), 8)) { return TokenKind::KwConstant }
+        if (str_match(src, start, cast<ptr<u8>>("function"), 8)) { return TokenKind::KwFunction }
+        if (str_match(src, start, cast<ptr<u8>>("external"), 8)) { return TokenKind::KwExternal }
+        if (str_match(src, start, cast<ptr<u8>>("continue"), 8)) { return TokenKind::KwContinue }
+        if (str_match(src, start, cast<ptr<u8>>("assembly"), 8)) { return TokenKind::KwAssembly }
+        if (str_match(src, start, cast<ptr<u8>>("bitfield"), 8)) { return TokenKind::KwBitfield }
+    }
+    if (length == 9) {
+        if (str_match(src, start, cast<ptr<u8>>("structure"), 9)) { return TokenKind::KwStructure }
+        if (str_match(src, start, cast<ptr<u8>>("directive"), 9)) { return TokenKind::KwDirective }
+    }
+    if (length == 10) {
+        if (str_match(src, start, cast<ptr<u8>>("address_of"), 10)) { return TokenKind::KwAddress_of }
+        if (str_match(src, start, cast<ptr<u8>>("dereference"), 11)) { return TokenKind::KwDereference }
+    }
+    if (length == 11) {
+        if (str_match(src, start, cast<ptr<u8>>("dereference"), 11)) { return TokenKind::KwDereference }
+        if (str_match(src, start, cast<ptr<u8>>("enumeration"), 11)) { return TokenKind::KwEnumeration }
+    }
+
+    return TokenKind::Identifier
+}
+
+§ --- Token Scanners ---
+
+function scan_identifier(lex: ptr<Lexer>): Token {
+    declare tok: Token
+    tok.line = dereference(lex).line
+    tok.column = dereference(lex).column
+    tok.start = dereference(lex).position
+
+    while (is_alnum(lexer_peek(lex))) {
+        lexer_advance(lex)
+    }
+
+    tok.length = dereference(lex).position - tok.start
+    tok.kind = match_keyword(dereference(lex).source, tok.start, tok.length)
+    return tok
+}
+
+function scan_number_token(lex: ptr<Lexer>): Token {
+    declare tok: Token
+    tok.line = dereference(lex).line
+    tok.column = dereference(lex).column
+    tok.start = dereference(lex).position
+    tok.kind = TokenKind::IntegerLiteral
+
+    § Check for hex (0x) or binary (0b)
+    if (lexer_peek(lex) == 48) {
+        declare next: u8 = lexer_peek_at(lex, 1)
+        if (next == 120 || next == 88) {  § 0x or 0X
+            lexer_advance(lex)
+            lexer_advance(lex)
+            while (is_hex_digit(lexer_peek(lex)) || lexer_peek(lex) == 95) {
+                lexer_advance(lex)
+            }
+            tok.length = dereference(lex).position - tok.start
+            tok.kind = TokenKind::HexLiteral
+            return tok
+        }
+        if (next == 98 || next == 66) {  § 0b or 0B
+            lexer_advance(lex)
+            lexer_advance(lex)
+            while (lexer_peek(lex) == 48 || lexer_peek(lex) == 49 || lexer_peek(lex) == 95) {
+                lexer_advance(lex)
+            }
+            tok.length = dereference(lex).position - tok.start
+            tok.kind = TokenKind::BinaryLiteral
+            return tok
+        }
+    }
+
+    § Regular number
+    while (is_digit(lexer_peek(lex)) || lexer_peek(lex) == 95) {
+        lexer_advance(lex)
+    }
+
+    § Fractional part
+    if (lexer_peek(lex) == 46 && is_digit(lexer_peek_at(lex, 1))) {
+        tok.kind = TokenKind::FloatLiteral
+        lexer_advance(lex)  § skip dot
+        while (is_digit(lexer_peek(lex)) || lexer_peek(lex) == 95) {
+            lexer_advance(lex)
+        }
+    }
+
+    § Exponent
+    declare e: u8 = lexer_peek(lex)
+    if (e == 69 || e == 101) {
+        tok.kind = TokenKind::FloatLiteral
+        lexer_advance(lex)
+        if (lexer_peek(lex) == 43 || lexer_peek(lex) == 45) {
+            lexer_advance(lex)
+        }
+        while (is_digit(lexer_peek(lex))) {
+            lexer_advance(lex)
+        }
+    }
+
+    tok.length = dereference(lex).position - tok.start
+    return tok
+}
+
+function scan_string_token(lex: ptr<Lexer>): Token {
+    declare tok: Token
+    tok.line = dereference(lex).line
+    tok.column = dereference(lex).column
+    tok.start = dereference(lex).position
+    tok.kind = TokenKind::StringLiteral
+
+    lexer_advance(lex)  § skip opening "
+
+    declare escaped: bool = false
+    loop {
+        declare c: u8 = lexer_peek(lex)
+        if (c == 0) {
+            tok.kind = TokenKind::Error
+            break
+        }
+        lexer_advance(lex)
+        if (escaped) {
+            escaped = false
+            continue
+        }
+        if (c == 92) { escaped = true; continue }
+        if (c == 34) { break }
+    }
+
+    tok.length = dereference(lex).position - tok.start
+    return tok
+}
+
+function scan_char_token(lex: ptr<Lexer>): Token {
+    declare tok: Token
+    tok.line = dereference(lex).line
+    tok.column = dereference(lex).column
+    tok.start = dereference(lex).position
+    tok.kind = TokenKind::CharLiteral
+
+    lexer_advance(lex)  § skip opening '
+    if (lexer_peek(lex) == 92) {
+        lexer_advance(lex)  § escape backslash
+    }
+    lexer_advance(lex)  § the character
+    if (lexer_peek(lex) == 39) {
+        lexer_advance(lex)  § closing '
+    } else {
+        tok.kind = TokenKind::Error
+    }
+
+    tok.length = dereference(lex).position - tok.start
+    return tok
+}
+
+§ --- Main Tokenization ---
+
+function lexer_next_token(lex: ptr<Lexer>): Token {
+    skip_whitespace_and_comments(lex)
+
+    declare tok: Token
+    tok.line = dereference(lex).line
+    tok.column = dereference(lex).column
+
+    declare c: u8 = lexer_peek(lex)
+
+    § EOF
+    if (c == 0 || dereference(lex).position >= dereference(lex).source_length) {
+        tok.kind = TokenKind::EndOfFile
+        tok.start = dereference(lex).position
+        tok.length = 0
+        return tok
+    }
+
+    § Identifiers and keywords
+    if (is_alpha(c)) {
+        declare id_tok: Token = scan_identifier(lex)
+        dereference(lex).token_count = dereference(lex).token_count + 1
+        return id_tok
+    }
+
+    § Numbers
+    if (is_digit(c)) {
+        declare num_tok: Token = scan_number_token(lex)
+        dereference(lex).token_count = dereference(lex).token_count + 1
+        return num_tok
+    }
+
+    § Strings
+    if (c == 34) {
+        declare str_tok: Token = scan_string_token(lex)
+        dereference(lex).token_count = dereference(lex).token_count + 1
+        return str_tok
+    }
+
+    § Characters
+    if (c == 39) {
+        declare chr_tok: Token = scan_char_token(lex)
+        dereference(lex).token_count = dereference(lex).token_count + 1
+        return chr_tok
+    }
+
+    § Operators and delimiters
+    tok.start = dereference(lex).position
+    lexer_advance(lex)
+
+    § Two-character operators (check next character)
+    declare next: u8 = lexer_peek(lex)
+
+    if (c == 61 && next == 61) { lexer_advance(lex); tok.kind = TokenKind::EqualEqual; tok.length = 2; dereference(lex).token_count = dereference(lex).token_count + 1; return tok }
+    if (c == 33 && next == 61) { lexer_advance(lex); tok.kind = TokenKind::BangEqual; tok.length = 2; dereference(lex).token_count = dereference(lex).token_count + 1; return tok }
+    if (c == 60 && next == 61) { lexer_advance(lex); tok.kind = TokenKind::LessEqual; tok.length = 2; dereference(lex).token_count = dereference(lex).token_count + 1; return tok }
+    if (c == 62 && next == 61) { lexer_advance(lex); tok.kind = TokenKind::GreaterEqual; tok.length = 2; dereference(lex).token_count = dereference(lex).token_count + 1; return tok }
+    if (c == 38 && next == 38) { lexer_advance(lex); tok.kind = TokenKind::AmpAmp; tok.length = 2; dereference(lex).token_count = dereference(lex).token_count + 1; return tok }
+    if (c == 124 && next == 124) { lexer_advance(lex); tok.kind = TokenKind::PipePipe; tok.length = 2; dereference(lex).token_count = dereference(lex).token_count + 1; return tok }
+    if (c == 60 && next == 60) { lexer_advance(lex); tok.kind = TokenKind::ShiftLeft; tok.length = 2; dereference(lex).token_count = dereference(lex).token_count + 1; return tok }
+    if (c == 62 && next == 62) { lexer_advance(lex); tok.kind = TokenKind::ShiftRight; tok.length = 2; dereference(lex).token_count = dereference(lex).token_count + 1; return tok }
+    if (c == 43 && next == 61) { lexer_advance(lex); tok.kind = TokenKind::PlusAssign; tok.length = 2; dereference(lex).token_count = dereference(lex).token_count + 1; return tok }
+    if (c == 45 && next == 61) { lexer_advance(lex); tok.kind = TokenKind::MinusAssign; tok.length = 2; dereference(lex).token_count = dereference(lex).token_count + 1; return tok }
+    if (c == 42 && next == 61) { lexer_advance(lex); tok.kind = TokenKind::StarAssign; tok.length = 2; dereference(lex).token_count = dereference(lex).token_count + 1; return tok }
+    if (c == 47 && next == 61) { lexer_advance(lex); tok.kind = TokenKind::SlashAssign; tok.length = 2; dereference(lex).token_count = dereference(lex).token_count + 1; return tok }
+    if (c == 58 && next == 58) { lexer_advance(lex); tok.kind = TokenKind::ColonColon; tok.length = 2; dereference(lex).token_count = dereference(lex).token_count + 1; return tok }
+    if (c == 45 && next == 62) { lexer_advance(lex); tok.kind = TokenKind::Arrow; tok.length = 2; dereference(lex).token_count = dereference(lex).token_count + 1; return tok }
+
+    § Single-character tokens
+    tok.length = 1
+    dereference(lex).token_count = dereference(lex).token_count + 1
+
+    if (c == 43) { tok.kind = TokenKind::Plus; return tok }
+    if (c == 45) { tok.kind = TokenKind::Minus; return tok }
+    if (c == 42) { tok.kind = TokenKind::Star; return tok }
+    if (c == 47) { tok.kind = TokenKind::Slash; return tok }
+    if (c == 37) { tok.kind = TokenKind::Percent; return tok }
+    if (c == 38) { tok.kind = TokenKind::Ampersand; return tok }
+    if (c == 124) { tok.kind = TokenKind::Pipe; return tok }
+    if (c == 94) { tok.kind = TokenKind::Caret; return tok }
+    if (c == 126) { tok.kind = TokenKind::Tilde; return tok }
+    if (c == 33) { tok.kind = TokenKind::Bang; return tok }
+    if (c == 61) { tok.kind = TokenKind::Assign; return tok }
+    if (c == 60) { tok.kind = TokenKind::Less; return tok }
+    if (c == 62) { tok.kind = TokenKind::Greater; return tok }
+    if (c == 46) { tok.kind = TokenKind::Dot; return tok }
+    if (c == 40) { tok.kind = TokenKind::LeftParen; return tok }
+    if (c == 41) { tok.kind = TokenKind::RightParen; return tok }
+    if (c == 123) { tok.kind = TokenKind::LeftBrace; return tok }
+    if (c == 125) { tok.kind = TokenKind::RightBrace; return tok }
+    if (c == 91) { tok.kind = TokenKind::LeftBracket; return tok }
+    if (c == 93) { tok.kind = TokenKind::RightBracket; return tok }
+    if (c == 59) { tok.kind = TokenKind::Semicolon; return tok }
+    if (c == 58) { tok.kind = TokenKind::Colon; return tok }
+    if (c == 44) { tok.kind = TokenKind::Comma; return tok }
+
+    § Unknown
+    tok.kind = TokenKind::Error
+    dereference(lex).error_count = dereference(lex).error_count + 1
+    return tok
+}
+
+§ --- Batch Tokenization ---
+§ Tokenizes entire source into a buffer of tokens
+§ Returns number of tokens written
+
+function lexer_tokenize_all(
+    source: ptr<u8>,
+    source_length: u64,
+    token_buffer: ptr<Token>,
+    max_tokens: u64
+): u64 {
+    declare lex: Lexer = lexer_init(source, source_length)
+    declare count: u64 = 0
+
+    while (count < max_tokens) {
+        declare tok: Token = lexer_next_token(address_of(lex))
+        declare slot: ptr<Token> = cast<ptr<Token>>(
+            cast<u64>(token_buffer) + count * sizeof(Token)
+        )
+        dereference(slot) = tok
+        count = count + 1
+
+        if (tok.kind == TokenKind::EndOfFile) {
+            break
+        }
+        if (tok.kind == TokenKind::Error) {
+            break
+        }
+    }
+
+    return count
+}

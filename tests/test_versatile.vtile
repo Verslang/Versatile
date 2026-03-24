@@ -1,0 +1,426 @@
+§ ============================================================================
+§ Versatile Language Test Suite (.vtile)
+§ Tests combined Verslang + Versscript in a single file
+§ The .vtile format allows embedding both languages with cross-boundary
+§ data interchange
+§ ============================================================================
+
+§ ============================================================================
+§ Section 1: Pure Versscript Blocks
+§ ============================================================================
+
+versscript {
+    § High-level test infrastructure
+    var test_count = 0
+    var pass_count = 0
+
+    func assert(cond, name) {
+        test_count = test_count + 1
+        if (cond) {
+            pass_count = pass_count + 1
+            print("[PASS] " + name)
+        } else {
+            print("[FAIL] " + name)
+        }
+    }
+
+    func assert_eq(a, b, name) {
+        assert(a == b, name)
+    }
+
+    print("=== Versatile (.vtile) Test Suite ===")
+    print("")
+
+    § --- Versscript logic tests ---
+    print("--- Versscript Block Tests ---")
+
+    var items = [10, 20, 30, 40, 50]
+    var total = reduce(items, func(acc, x) { return acc + x }, 0)
+    assert_eq(total, 150, "versscript array reduce")
+
+    class Vector {
+        func init(x, y) {
+            this.x = x
+            this.y = y
+        }
+        func magnitude() {
+            return Math.sqrt(this.x * this.x + this.y * this.y)
+        }
+        func add(other) {
+            return new Vector(this.x + other.x, this.y + other.y)
+        }
+    }
+
+    var v1 = new Vector(3, 4)
+    assert_eq(v1.magnitude(), 5, "vector magnitude 3-4-5")
+
+    var v2 = new Vector(1, 2)
+    var v3 = v1.add(v2)
+    assert_eq(v3.x, 4, "vector add x")
+    assert_eq(v3.y, 6, "vector add y")
+
+    § HashMap test
+    var config = HashMap()
+    config.set("compiler", "verslang")
+    config.set("runtime", "versscript")
+    config.set("version", "1.0")
+    assert_eq(config.get("compiler"), "verslang", "config compiler")
+    assert_eq(config.size(), 3, "config size")
+
+    § Closure and functional
+    func make_adder(n) {
+        return func(x) { return x + n }
+    }
+    var add10 = make_adder(10)
+    assert_eq(add10(5), 15, "closure adder")
+
+    § String processing
+    var csv = "alice,30,engineer;bob,25,designer;carol,35,manager"
+    var rows = split(csv, ";")
+    assert_eq(length(rows), 3, "csv row count")
+    var first_row = split(rows[0], ",")
+    assert_eq(first_row[0], "alice", "csv first name")
+    assert_eq(first_row[2], "engineer", "csv first role")
+}
+
+§ ============================================================================
+§ Section 2: Pure Verslang Blocks
+§ ============================================================================
+
+verslang {
+    § Low-level computational kernels
+
+    constant BUFFER_SIZE: u64 = 4096
+    constant MAGIC_NUMBER: u32 = 0xDEADBEEF
+
+    structure Matrix2x2 {
+        m00: f64,
+        m01: f64,
+        m10: f64,
+        m11: f64
+    }
+
+    structure BoundingBox {
+        min_x: f64,
+        min_y: f64,
+        max_x: f64,
+        max_y: f64
+    }
+
+    enumeration ErrorCode {
+        Success = 0,
+        InvalidInput = 1,
+        OutOfMemory = 2,
+        IOError = 3,
+        ParseError = 4
+    }
+
+    function matrix_determinant(mat: Matrix2x2): f64 {
+        return mat.m00 * mat.m11 - mat.m01 * mat.m10
+    }
+
+    function matrix_multiply(a: Matrix2x2, b: Matrix2x2): Matrix2x2 {
+        declare result: Matrix2x2
+        result.m00 = a.m00 * b.m00 + a.m01 * b.m10
+        result.m01 = a.m00 * b.m01 + a.m01 * b.m11
+        result.m10 = a.m10 * b.m00 + a.m11 * b.m10
+        result.m11 = a.m10 * b.m01 + a.m11 * b.m11
+        return result
+    }
+
+    function bbox_contains(box: BoundingBox, px: f64, py: f64): bool {
+        return px >= box.min_x
+            && px <= box.max_x
+            && py >= box.min_y
+            && py <= box.max_y
+    }
+
+    function bbox_area(box: BoundingBox): f64 {
+        declare width: f64 = box.max_x - box.min_x
+        declare height: f64 = box.max_y - box.min_y
+        return width * height
+    }
+
+    § Fast integer operations via assembly
+    function fast_popcount(x: u64): u32 {
+        declare count: u32 = 0
+        assembly {
+            popcnt rax, [rbp - 8]
+            mov [rbp - 12], eax
+        }
+        return count
+    }
+
+    function rotate_left(value: u64, shift: u8): u64 {
+        declare result: u64 = 0
+        assembly {
+            mov rax, [rbp - 8]
+            mov cl, [rbp - 9]
+            rol rax, cl
+            mov [rbp - 17], rax
+        }
+        return result
+    }
+
+    § Byte-level string hash (FNV-1a)
+    function fnv1a_hash(data: ptr<u8>, len: u64): u64 {
+        constant FNV_OFFSET: u64 = 14695981039346656037
+        constant FNV_PRIME: u64 = 1099511628211
+        declare hash: u64 = FNV_OFFSET
+        for (declare i: u64 = 0; i < len; i = i + 1) {
+            declare byte: u8 = dereference(cast<ptr<u8>>(cast<u64>(data) + i))
+            hash = hash ^ cast<u64>(byte)
+            hash = hash * FNV_PRIME
+        }
+        return hash
+    }
+
+    § CRC32 table-less computation
+    function crc32_byte(crc: u32, byte: u8): u32 {
+        declare result: u32 = crc ^ cast<u32>(byte)
+        for (declare bit: i32 = 0; bit < 8; bit = bit + 1) {
+            if ((result & 1) != 0) {
+                result = (result >> 1) ^ 0xEDB88320
+            } else {
+                result = result >> 1
+            }
+        }
+        return result
+    }
+}
+
+§ ============================================================================
+§ Section 3: Cross-Language Data Exchange
+§ ============================================================================
+
+versscript {
+    print("")
+    print("--- Cross-Language Exchange Tests ---")
+
+    § Versscript prepares high-level data structures
+    var matrix_data = {
+        "m00": 1.0, "m01": 2.0,
+        "m10": 3.0, "m11": 4.0
+    }
+
+    § In a real Versatile runtime, this data would be passed to the
+    § Verslang block via shared memory or FFI
+    var det = matrix_data.m00 * matrix_data.m11 - matrix_data.m01 * matrix_data.m10
+    assert_eq(det, -2, "matrix determinant (scripted)")
+
+    § Bounding box test
+    var bbox = {
+        "min_x": 0, "min_y": 0,
+        "max_x": 100, "max_y": 100
+    }
+    var inside = 50 >= bbox.min_x && 50 <= bbox.max_x
+                 && 50 >= bbox.min_y && 50 <= bbox.max_y
+    assert(inside, "bbox contains point (scripted)")
+
+    var area = (bbox.max_x - bbox.min_x) * (bbox.max_y - bbox.min_y)
+    assert_eq(area, 10000, "bbox area (scripted)")
+}
+
+§ ============================================================================
+§ Section 4: Mixed Pipeline Pattern
+§ ============================================================================
+
+versscript {
+    print("")
+    print("--- Mixed Pipeline Tests ---")
+
+    § Simulate a data processing pipeline where:
+    § 1. Versscript reads/parses input data
+    § 2. Verslang processes the heavy computation
+    § 3. Versscript formats and outputs results
+
+    § Step 1: Parse CSV-like data (Versscript)
+    var raw_data = "100,200,300,400,500"
+    var values = split(raw_data, ",")
+    var numbers = map(values, func(v) { return toNumber(v) })
+
+    assert_eq(length(numbers), 5, "pipeline parse count")
+    assert_eq(numbers[0], 100, "pipeline first value")
+
+    § Step 2: Compute statistics (simulating Verslang-speed computation)
+    var sum = reduce(numbers, func(a, x) { return a + x }, 0)
+    var avg = sum / length(numbers)
+    var min_val = numbers[0]
+    var max_val = numbers[0]
+    foreach (n in numbers) {
+        if (n < min_val) { min_val = n }
+        if (n > max_val) { max_val = n }
+    }
+
+    assert_eq(sum, 1500, "pipeline sum")
+    assert_eq(avg, 300, "pipeline average")
+    assert_eq(min_val, 100, "pipeline min")
+    assert_eq(max_val, 500, "pipeline max")
+
+    § Step 3: Format output (Versscript)
+    var report = "Stats: sum=" + toString(sum) +
+                 " avg=" + toString(avg) +
+                 " min=" + toString(min_val) +
+                 " max=" + toString(max_val)
+    assert(contains(report, "sum=1500"), "pipeline report sum")
+    assert(contains(report, "avg=300"), "pipeline report avg")
+}
+
+§ ============================================================================
+§ Section 5: Configuration and Build Pattern
+§ ============================================================================
+
+versscript {
+    print("")
+    print("--- Config & Build Pattern Tests ---")
+
+    § Versatile files can define build configurations
+    § mixing high-level config with low-level specs
+
+    class BuildConfig {
+        func init() {
+            this.target = "native"
+            this.optimize = true
+            this.debug = false
+            this.output_format = "pe64"
+            this.libs = []
+        }
+
+        func addLib(lib) {
+            push(this.libs, lib)
+            return this
+        }
+
+        func setTarget(t) {
+            this.target = t
+            return this
+        }
+
+        func toString() {
+            return "BuildConfig{target=" + this.target +
+                   ", optimize=" + toString(this.optimize) +
+                   ", libs=" + join(this.libs, ",") + "}"
+        }
+    }
+
+    var config = new BuildConfig()
+    config.addLib("libc").addLib("libm").setTarget("x86_64-linux")
+    assert_eq(config.target, "x86_64-linux", "build target")
+    assert_eq(length(config.libs), 2, "build libs count")
+    assert(contains(config.toString(), "libc"), "config string has libc")
+}
+
+verslang {
+    § Platform-specific build configuration
+    when platform == "windows" {
+        constant DEFAULT_OUTPUT: u32 = 0    § 0 = PE64
+        constant PATH_SEPARATOR: u8 = 92   § backslash
+    }
+
+    when platform == "linux" {
+        constant DEFAULT_OUTPUT: u32 = 1    § 1 = ELF64
+        constant PATH_SEPARATOR: u8 = 47   § forward slash
+    }
+
+    structure CompilerConfig {
+        optimization_level: u8,
+        output_format: u32,
+        stack_size: u64,
+        heap_size: u64,
+        entry_point: ptr<u8>
+    }
+
+    function default_config(): CompilerConfig {
+        declare cfg: CompilerConfig
+        cfg.optimization_level = 2
+        cfg.output_format = DEFAULT_OUTPUT
+        cfg.stack_size = 1048576        § 1MB
+        cfg.heap_size = 16777216        § 16MB
+        cfg.entry_point = cast<ptr<u8>>(0)
+        return cfg
+    }
+}
+
+§ ============================================================================
+§ Section 6: Plugin Architecture Pattern
+§ ============================================================================
+
+versscript {
+    print("")
+    print("--- Plugin Architecture Tests ---")
+
+    § Demonstrate how .vtile files can define plugin interfaces
+    § where Versscript defines the API and Verslang implements perf-critical parts
+
+    class PluginManager {
+        func init() {
+            this.plugins = HashMap()
+        }
+
+        func register(name, plugin) {
+            this.plugins.set(name, plugin)
+        }
+
+        func execute(name, data) {
+            if (this.plugins.has(name)) {
+                var plugin = this.plugins.get(name)
+                return plugin.process(data)
+            }
+            return null
+        }
+
+        func list() {
+            return this.plugins.keys()
+        }
+    }
+
+    class UppercasePlugin {
+        func process(data) {
+            return toUpper(data)
+        }
+    }
+
+    class ReversePlugin {
+        func process(data) {
+            if (typeOf(data) == "string") {
+                return join(reverse(split(data, "")), "")
+            }
+            return data
+        }
+    }
+
+    class CountPlugin {
+        func process(data) {
+            return length(data)
+        }
+    }
+
+    var pm = new PluginManager()
+    pm.register("uppercase", new UppercasePlugin())
+    pm.register("reverse", new ReversePlugin())
+    pm.register("count", new CountPlugin())
+
+    assert_eq(pm.execute("uppercase", "hello"), "HELLO", "plugin uppercase")
+    assert_eq(pm.execute("reverse", "abc"), "cba", "plugin reverse")
+    assert_eq(pm.execute("count", "hello"), 5, "plugin count")
+    assert_eq(length(pm.list()), 3, "plugin list count")
+}
+
+§ ============================================================================
+§ Section 7: Test Summary
+§ ============================================================================
+
+versscript {
+    print("")
+    print("================================================")
+    print("  Versatile (.vtile) Test Suite Results")
+    print("================================================")
+    print("  Total:  " + toString(test_count))
+    print("  Passed: " + toString(pass_count))
+    print("  Failed: " + toString(test_count - pass_count))
+    print("================================================")
+    if (test_count == pass_count) {
+        print("  ALL TESTS PASSED!")
+    }
+    print("================================================")
+}

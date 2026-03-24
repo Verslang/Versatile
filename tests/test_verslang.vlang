@@ -1,0 +1,582 @@
+§ ============================================================================
+§ Verslang Language Test Suite
+§ Tests all core language features: types, control flow, structures,
+§ assembly, memory, syscalls, and code generation
+§ Compile: verslang tests/test_verslang.vlang -o test_verslang -f pe64
+§ ============================================================================
+
+§ --- External C runtime functions for test output ---
+external function write(fd: i32, buf: ptr<u8>, count: u64): i64
+external function exit(code: i32): void
+
+§ ============================================================================
+§ Section 1: Constants and Variables
+§ ============================================================================
+
+constant VERSION_MAJOR: u32 = 1
+constant VERSION_MINOR: u32 = 0
+constant PI_APPROX: f64 = 3.14159265358979
+constant MAX_TESTS: u32 = 64
+constant NEWLINE: u8 = 10
+
+mutable test_count: i32 = 0
+mutable pass_count: i32 = 0
+mutable fail_count: i32 = 0
+
+§ ============================================================================
+§ Section 2: Structures
+§ ============================================================================
+
+structure TestResult {
+    name: ptr<u8>,
+    name_len: u64,
+    passed: bool
+}
+
+structure Vec2 {
+    x: f64,
+    y: f64
+}
+
+structure Vec3 {
+    x: f64,
+    y: f64,
+    z: f64
+}
+
+structure Color {
+    r: u8,
+    g: u8,
+    b: u8,
+    a: u8
+}
+
+structure LinkedNode {
+    value: i64,
+    next: ptr<LinkedNode>
+}
+
+§ ============================================================================
+§ Section 3: Enumerations
+§ ============================================================================
+
+enumeration TokenType {
+    Integer = 0,
+    Float = 1,
+    String = 2,
+    Identifier = 3,
+    Keyword = 4,
+    Operator = 5,
+    EOF = 6
+}
+
+enumeration Platform {
+    Windows = 0,
+    Linux = 1,
+    MacOS = 2
+}
+
+§ ============================================================================
+§ Section 4: Unions and Bitfields
+§ ============================================================================
+
+union Value {
+    as_int: i64,
+    as_float: f64,
+    as_ptr: ptr<u8>
+}
+
+bitfield Permissions {
+    read: 1,
+    write: 1,
+    execute: 1,
+    owner: 1,
+    group: 1,
+    other: 1,
+    sticky: 1,
+    setuid: 1
+}
+
+§ ============================================================================
+§ Section 5: Utility Functions
+§ ============================================================================
+
+function print_string(msg: ptr<u8>, len: u64): void {
+    write(1, msg, len)
+}
+
+function print_newline(): void {
+    declare nl: u8 = 10
+    write(1, address_of(nl), 1)
+}
+
+function print_ok(): void {
+    declare msg: array<u8, 6> = "  [OK]"
+    print_string(cast<ptr<u8>>(address_of(msg)), 6)
+    print_newline()
+}
+
+function print_fail(): void {
+    declare msg: array<u8, 8> = "  [FAIL]"
+    print_string(cast<ptr<u8>>(address_of(msg)), 8)
+    print_newline()
+}
+
+function assert_true(condition: bool, name: ptr<u8>, name_len: u64): void {
+    test_count = test_count + 1
+    print_string(name, name_len)
+    if (condition) {
+        pass_count = pass_count + 1
+        print_ok()
+    } else {
+        fail_count = fail_count + 1
+        print_fail()
+    }
+}
+
+function assert_eq_i64(actual: i64, expected: i64, name: ptr<u8>, name_len: u64): void {
+    assert_true(actual == expected, name, name_len)
+}
+
+function assert_eq_u32(actual: u32, expected: u32, name: ptr<u8>, name_len: u64): void {
+    assert_true(actual == expected, name, name_len)
+}
+
+§ ============================================================================
+§ Section 6: Math Functions
+§ ============================================================================
+
+function abs_i64(x: i64): i64 {
+    if (x < 0) {
+        return 0 - x
+    }
+    return x
+}
+
+function min_i64(a: i64, b: i64): i64 {
+    if (a < b) {
+        return a
+    }
+    return b
+}
+
+function max_i64(a: i64, b: i64): i64 {
+    if (a > b) {
+        return a
+    }
+    return b
+}
+
+function clamp_i64(val: i64, lo: i64, hi: i64): i64 {
+    return max_i64(lo, min_i64(val, hi))
+}
+
+function fibonacci(n: i32): i64 {
+    if (n <= 1) {
+        return cast<i64>(n)
+    }
+    return fibonacci(n - 1) + fibonacci(n - 2)
+}
+
+function factorial(n: i32): i64 {
+    if (n <= 1) {
+        return 1
+    }
+    return cast<i64>(n) * factorial(n - 1)
+}
+
+function gcd(a: i64, b: i64): i64 {
+    while (b != 0) {
+        declare temp: i64 = b
+        b = a - (a / b) * b
+        a = temp
+    }
+    return a
+}
+
+function power(base: i64, exp: i32): i64 {
+    declare result: i64 = 1
+    for (declare i: i32 = 0; i < exp; i = i + 1) {
+        result = result * base
+    }
+    return result
+}
+
+§ ============================================================================
+§ Section 7: String Functions
+§ ============================================================================
+
+function string_length(str: ptr<u8>): u64 {
+    declare len: u64 = 0
+    while (dereference(cast<ptr<u8>>(cast<u64>(str) + len)) != 0) {
+        len = len + 1
+    }
+    return len
+}
+
+function string_equal(a: ptr<u8>, b: ptr<u8>, len: u64): bool {
+    for (declare i: u64 = 0; i < len; i = i + 1) {
+        declare ca: u8 = dereference(cast<ptr<u8>>(cast<u64>(a) + i))
+        declare cb: u8 = dereference(cast<ptr<u8>>(cast<u64>(b) + i))
+        if (ca != cb) {
+            return false
+        }
+    }
+    return true
+}
+
+§ ============================================================================
+§ Section 8: Memory Operations
+§ ============================================================================
+
+function memset(dest: ptr<u8>, val: u8, count: u64): void {
+    for (declare i: u64 = 0; i < count; i = i + 1) {
+        declare target: ptr<u8> = cast<ptr<u8>>(cast<u64>(dest) + i)
+        § Store byte at target
+    }
+}
+
+function memcpy(dest: ptr<u8>, src: ptr<u8>, count: u64): void {
+    for (declare i: u64 = 0; i < count; i = i + 1) {
+        declare s: u8 = dereference(cast<ptr<u8>>(cast<u64>(src) + i))
+        declare d: ptr<u8> = cast<ptr<u8>>(cast<u64>(dest) + i)
+        § Copy byte from src to dest
+    }
+}
+
+§ ============================================================================
+§ Section 9: Data Structure Operations
+§ ============================================================================
+
+function vec2_add(a: Vec2, b: Vec2): Vec2 {
+    declare result: Vec2
+    result.x = a.x + b.x
+    result.y = a.y + b.y
+    return result
+}
+
+function vec2_dot(a: Vec2, b: Vec2): f64 {
+    return a.x * b.x + a.y * b.y
+}
+
+function vec3_cross_x(a: Vec3, b: Vec3): f64 {
+    return a.y * b.z - a.z * b.y
+}
+
+function color_from_rgb(r: u8, g: u8, b: u8): Color {
+    declare c: Color
+    c.r = r
+    c.g = g
+    c.b = b
+    c.a = 255
+    return c
+}
+
+function color_to_u32(c: Color): u32 {
+    return cast<u32>(c.a) * 16777216 + cast<u32>(c.r) * 65536 + cast<u32>(c.g) * 256 + cast<u32>(c.b)
+}
+
+§ ============================================================================
+§ Section 10: Assembly Integration
+§ ============================================================================
+
+function fast_add(a: i64, b: i64): i64 {
+    declare result: i64 = 0
+    assembly {
+        mov rax, [rbp - 8]
+        add rax, [rbp - 16]
+        mov [rbp - 24], rax
+    }
+    return result
+}
+
+function cpu_id(): u32 {
+    declare result: u32 = 0
+    assembly {
+        xor eax, eax
+        cpuid
+        mov [rbp - 4], eax
+    }
+    return result
+}
+
+function read_timestamp(): u64 {
+    declare lo: u32 = 0
+    declare hi: u32 = 0
+    assembly {
+        rdtsc
+        mov [rbp - 4], eax
+        mov [rbp - 8], edx
+    }
+    return cast<u64>(hi) * 4294967296 + cast<u64>(lo)
+}
+
+§ ============================================================================
+§ Section 11: Platform-Specific Code
+§ ============================================================================
+
+when platform == "windows" {
+    function get_platform_name(buf: ptr<u8>): u64 {
+        declare name: array<u8, 7> = "Windows"
+        memcpy(buf, cast<ptr<u8>>(address_of(name)), 7)
+        return 7
+    }
+}
+
+when platform == "linux" {
+    function get_platform_name(buf: ptr<u8>): u64 {
+        declare name: array<u8, 5> = "Linux"
+        memcpy(buf, cast<ptr<u8>>(address_of(name)), 5)
+        return 5
+    }
+}
+
+§ ============================================================================
+§ Section 12: Test Runner
+§ ============================================================================
+
+function run_arithmetic_tests(): void {
+    declare header: array<u8, 25> = "--- Arithmetic Tests ---\n"
+    print_string(cast<ptr<u8>>(address_of(header)), 25)
+
+    § Test basic arithmetic
+    declare t1: array<u8, 10> = "add i64   "
+    assert_eq_i64(3 + 4, 7, cast<ptr<u8>>(address_of(t1)), 10)
+
+    declare t2: array<u8, 10> = "sub i64   "
+    assert_eq_i64(10 - 3, 7, cast<ptr<u8>>(address_of(t2)), 10)
+
+    declare t3: array<u8, 10> = "mul i64   "
+    assert_eq_i64(6 * 7, 42, cast<ptr<u8>>(address_of(t3)), 10)
+
+    declare t4: array<u8, 10> = "div i64   "
+    assert_eq_i64(42 / 6, 7, cast<ptr<u8>>(address_of(t4)), 10)
+
+    declare t5: array<u8, 10> = "neg i64   "
+    assert_eq_i64(0 - 42, cast<i64>(0) - 42, cast<ptr<u8>>(address_of(t5)), 10)
+
+    declare t6: array<u8, 10> = "abs i64   "
+    assert_eq_i64(abs_i64(cast<i64>(0) - 5), 5, cast<ptr<u8>>(address_of(t6)), 10)
+
+    declare t7: array<u8, 10> = "power     "
+    assert_eq_i64(power(2, 10), 1024, cast<ptr<u8>>(address_of(t7)), 10)
+}
+
+function run_fibonacci_tests(): void {
+    declare header: array<u8, 25> = "--- Fibonacci Tests  ---\n"
+    print_string(cast<ptr<u8>>(address_of(header)), 25)
+
+    declare t1: array<u8, 10> = "fib(0)    "
+    assert_eq_i64(fibonacci(0), 0, cast<ptr<u8>>(address_of(t1)), 10)
+
+    declare t2: array<u8, 10> = "fib(1)    "
+    assert_eq_i64(fibonacci(1), 1, cast<ptr<u8>>(address_of(t2)), 10)
+
+    declare t3: array<u8, 10> = "fib(10)   "
+    assert_eq_i64(fibonacci(10), 55, cast<ptr<u8>>(address_of(t3)), 10)
+
+    declare t4: array<u8, 10> = "fib(20)   "
+    assert_eq_i64(fibonacci(20), 6765, cast<ptr<u8>>(address_of(t4)), 10)
+
+    declare t5: array<u8, 10> = "fact(5)   "
+    assert_eq_i64(factorial(5), 120, cast<ptr<u8>>(address_of(t5)), 10)
+
+    declare t6: array<u8, 10> = "fact(10)  "
+    assert_eq_i64(factorial(10), 3628800, cast<ptr<u8>>(address_of(t6)), 10)
+
+    declare t7: array<u8, 10> = "gcd       "
+    assert_eq_i64(gcd(48, 18), 6, cast<ptr<u8>>(address_of(t7)), 10)
+}
+
+function run_control_flow_tests(): void {
+    declare header: array<u8, 28> = "--- Control Flow Tests   ---\n"
+    print_string(cast<ptr<u8>>(address_of(header)), 28)
+
+    § If/else
+    declare t1: array<u8, 10> = "if true   "
+    declare if_result: i64 = 0
+    if (true) {
+        if_result = 1
+    }
+    assert_eq_i64(if_result, 1, cast<ptr<u8>>(address_of(t1)), 10)
+
+    § While loop
+    declare t2: array<u8, 10> = "while     "
+    declare sum: i64 = 0
+    declare wi: i32 = 0
+    while (wi < 10) {
+        sum = sum + cast<i64>(wi)
+        wi = wi + 1
+    }
+    assert_eq_i64(sum, 45, cast<ptr<u8>>(address_of(t2)), 10)
+
+    § For loop
+    declare t3: array<u8, 10> = "for loop  "
+    declare fsum: i64 = 0
+    for (declare fi: i32 = 1; fi <= 100; fi = fi + 1) {
+        fsum = fsum + cast<i64>(fi)
+    }
+    assert_eq_i64(fsum, 5050, cast<ptr<u8>>(address_of(t3)), 10)
+
+    § Nested loops
+    declare t4: array<u8, 10> = "nested    "
+    declare ncount: i64 = 0
+    for (declare ni: i32 = 0; ni < 10; ni = ni + 1) {
+        for (declare nj: i32 = 0; nj < 10; nj = nj + 1) {
+            ncount = ncount + 1
+        }
+    }
+    assert_eq_i64(ncount, 100, cast<ptr<u8>>(address_of(t4)), 10)
+
+    § Switch
+    declare t5: array<u8, 10> = "switch    "
+    declare sval: i64 = 0
+    declare stest: i32 = 2
+    switch (stest) {
+        case 1:
+            sval = 10
+            break
+        case 2:
+            sval = 20
+            break
+        case 3:
+            sval = 30
+            break
+    }
+    assert_eq_i64(sval, 20, cast<ptr<u8>>(address_of(t5)), 10)
+
+    § Loop with break
+    declare t6: array<u8, 10> = "break     "
+    declare bcount: i64 = 0
+    loop {
+        bcount = bcount + 1
+        if (bcount == 5) {
+            break
+        }
+    }
+    assert_eq_i64(bcount, 5, cast<ptr<u8>>(address_of(t6)), 10)
+}
+
+function run_structure_tests(): void {
+    declare header: array<u8, 25> = "--- Structure Tests  ---\n"
+    print_string(cast<ptr<u8>>(address_of(header)), 25)
+
+    § Vec2 operations
+    declare t1: array<u8, 10> = "vec2 add  "
+    declare a: Vec2
+    a.x = 1.0
+    a.y = 2.0
+    declare b: Vec2
+    b.x = 3.0
+    b.y = 4.0
+    declare c: Vec2 = vec2_add(a, b)
+    assert_true(c.x == 4.0, cast<ptr<u8>>(address_of(t1)), 10)
+
+    declare t2: array<u8, 10> = "vec2 dot  "
+    declare dot: f64 = vec2_dot(a, b)
+    assert_true(dot == 11.0, cast<ptr<u8>>(address_of(t2)), 10)
+
+    § Color
+    declare t3: array<u8, 10> = "color rgb "
+    declare col: Color = color_from_rgb(255, 128, 0)
+    assert_true(col.r == 255, cast<ptr<u8>>(address_of(t3)), 10)
+
+    declare t4: array<u8, 10> = "color u32 "
+    declare cu: u32 = color_to_u32(col)
+    assert_true(cu != 0, cast<ptr<u8>>(address_of(t4)), 10)
+
+    § Enum
+    declare t5: array<u8, 10> = "enum val  "
+    declare tok: TokenType = TokenType::Keyword
+    assert_eq_i64(cast<i64>(tok), 4, cast<ptr<u8>>(address_of(t5)), 10)
+}
+
+function run_type_tests(): void {
+    declare header: array<u8, 25> = "--- Type Cast Tests  ---\n"
+    print_string(cast<ptr<u8>>(address_of(header)), 25)
+
+    declare t1: array<u8, 10> = "i32->i64  "
+    declare small: i32 = 42
+    declare big: i64 = cast<i64>(small)
+    assert_eq_i64(big, 42, cast<ptr<u8>>(address_of(t1)), 10)
+
+    declare t2: array<u8, 10> = "u8->u32   "
+    declare byte: u8 = 255
+    declare word: u32 = cast<u32>(byte)
+    assert_eq_u32(word, 255, cast<ptr<u8>>(address_of(t2)), 10)
+
+    declare t3: array<u8, 10> = "sizeof    "
+    declare sz8: u64 = sizeof(u8)
+    declare sz32: u64 = sizeof(u32)
+    declare sz64: u64 = sizeof(u64)
+    assert_true(sz8 == 1, cast<ptr<u8>>(address_of(t3)), 10)
+
+    declare t4: array<u8, 10> = "sizeof 32 "
+    assert_true(sz32 == 4, cast<ptr<u8>>(address_of(t4)), 10)
+
+    declare t5: array<u8, 10> = "sizeof 64 "
+    assert_true(sz64 == 8, cast<ptr<u8>>(address_of(t5)), 10)
+
+    declare t6: array<u8, 10> = "ptr arith "
+    declare base_val: i64 = 100
+    declare p: ptr<i64> = address_of(base_val)
+    declare deref_val: i64 = dereference(p)
+    assert_eq_i64(deref_val, 100, cast<ptr<u8>>(address_of(t6)), 10)
+}
+
+function run_bitwise_tests(): void {
+    declare header: array<u8, 25> = "--- Bitwise Tests    ---\n"
+    print_string(cast<ptr<u8>>(address_of(header)), 25)
+
+    declare t1: array<u8, 10> = "AND       "
+    assert_eq_i64(cast<i64>(0xFF) & cast<i64>(0x0F), cast<i64>(0x0F), cast<ptr<u8>>(address_of(t1)), 10)
+
+    declare t2: array<u8, 10> = "OR        "
+    assert_eq_i64(cast<i64>(0xF0) | cast<i64>(0x0F), cast<i64>(0xFF), cast<ptr<u8>>(address_of(t2)), 10)
+
+    declare t3: array<u8, 10> = "XOR       "
+    assert_eq_i64(cast<i64>(0xFF) ^ cast<i64>(0x0F), cast<i64>(0xF0), cast<ptr<u8>>(address_of(t3)), 10)
+
+    declare t4: array<u8, 10> = "SHL       "
+    assert_eq_i64(1 << 10, 1024, cast<ptr<u8>>(address_of(t4)), 10)
+
+    declare t5: array<u8, 10> = "SHR       "
+    assert_eq_i64(1024 >> 10, 1, cast<ptr<u8>>(address_of(t5)), 10)
+}
+
+§ ============================================================================
+§ Section 13: Entry Point
+§ ============================================================================
+
+function _start(): void {
+    declare banner: array<u8, 52> = "================================================\n"
+    print_string(cast<ptr<u8>>(address_of(banner)), 52)
+    declare title: array<u8, 35> = "  Verslang Test Suite v1.0        \n"
+    print_string(cast<ptr<u8>>(address_of(title)), 35)
+    print_string(cast<ptr<u8>>(address_of(banner)), 52)
+    print_newline()
+
+    run_arithmetic_tests()
+    print_newline()
+    run_fibonacci_tests()
+    print_newline()
+    run_control_flow_tests()
+    print_newline()
+    run_structure_tests()
+    print_newline()
+    run_type_tests()
+    print_newline()
+    run_bitwise_tests()
+    print_newline()
+
+    print_string(cast<ptr<u8>>(address_of(banner)), 52)
+    declare done: array<u8, 20> = "  All tests done.  \n"
+    print_string(cast<ptr<u8>>(address_of(done)), 20)
+    print_string(cast<ptr<u8>>(address_of(banner)), 52)
+
+    if (fail_count == 0) {
+        exit(0)
+    } else {
+        exit(1)
+    }
+}

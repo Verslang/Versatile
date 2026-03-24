@@ -1,0 +1,238 @@
+§ ============================================================================
+§ Verslang Installer - Common Logic
+§ Shared functionality used by all platform-specific installers
+§ ============================================================================
+
+constant VERSLANG_VERSION_MAJOR: u32 = 1
+constant VERSLANG_VERSION_MINOR: u32 = 0
+constant VERSLANG_VERSION_PATCH: u32 = 0
+
+constant INSTALL_SUCCESS: i32 = 0
+constant INSTALL_ERROR_IO: i32 = 1
+constant INSTALL_ERROR_PERMISSION: i32 = 2
+constant INSTALL_ERROR_EXISTING: i32 = 3
+constant INSTALL_ERROR_CHECKSUM: i32 = 4
+
+structure InstallConfig {
+    install_dir: ptr<u8>,
+    install_dir_len: u64,
+    bin_dir: ptr<u8>,
+    bin_dir_len: u64,
+    add_to_path: bool,
+    create_shortcuts: bool,
+    verbose: bool,
+    force_overwrite: bool
+}
+
+structure FileEntry {
+    source_path: ptr<u8>,
+    source_len: u64,
+    dest_path: ptr<u8>,
+    dest_len: u64,
+    file_size: u64,
+    checksum: u32,
+    is_executable: bool
+}
+
+structure InstallProgress {
+    total_files: u32,
+    completed_files: u32,
+    total_bytes: u64,
+    completed_bytes: u64,
+    current_file: ptr<u8>,
+    current_file_len: u64
+}
+
+§ --- Utility Functions ---
+
+external function write(fd: i32, buf: ptr<u8>, count: u64): i64
+external function exit(code: i32): void
+
+function print_msg(msg: ptr<u8>, len: u64): void {
+    write(1, msg, len)
+}
+
+function print_line(msg: ptr<u8>, len: u64): void {
+    print_msg(msg, len)
+    declare nl: u8 = 10
+    write(1, address_of(nl), 1)
+}
+
+function print_newline(): void {
+    declare nl: u8 = 10
+    write(1, address_of(nl), 1)
+}
+
+§ --- Version String ---
+
+function print_version(): void {
+    declare msg: array<u8, 32> = "Verslang Installer v1.0.0      \n"
+    print_msg(cast<ptr<u8>>(address_of(msg)), 32)
+}
+
+§ --- Checksum (CRC32) ---
+
+function crc32_update(crc: u32, data: ptr<u8>, len: u64): u32 {
+    declare result: u32 = crc ^ 0xFFFFFFFF
+    for (declare i: u64 = 0; i < len; i = i + 1) {
+        declare byte: u8 = dereference(cast<ptr<u8>>(cast<u64>(data) + i))
+        result = result ^ cast<u32>(byte)
+        for (declare bit: i32 = 0; bit < 8; bit = bit + 1) {
+            if ((result & 1) != 0) {
+                result = (result >> 1) ^ 0xEDB88320
+            } else {
+                result = result >> 1
+            }
+        }
+    }
+    return result ^ 0xFFFFFFFF
+}
+
+function verify_checksum(data: ptr<u8>, len: u64, expected: u32): bool {
+    declare actual: u32 = crc32_update(0, data, len)
+    return actual == expected
+}
+
+§ --- String Operations ---
+
+function str_length(s: ptr<u8>): u64 {
+    declare len: u64 = 0
+    while (dereference(cast<ptr<u8>>(cast<u64>(s) + len)) != 0) {
+        len = len + 1
+    }
+    return len
+}
+
+function str_copy(dest: ptr<u8>, src: ptr<u8>, len: u64): void {
+    for (declare i: u64 = 0; i < len; i = i + 1) {
+        declare byte: u8 = dereference(cast<ptr<u8>>(cast<u64>(src) + i))
+        declare target: ptr<u8> = cast<ptr<u8>>(cast<u64>(dest) + i)
+        § Write byte to target
+    }
+}
+
+function str_equal(a: ptr<u8>, b: ptr<u8>, len: u64): bool {
+    for (declare i: u64 = 0; i < len; i = i + 1) {
+        declare ca: u8 = dereference(cast<ptr<u8>>(cast<u64>(a) + i))
+        declare cb: u8 = dereference(cast<ptr<u8>>(cast<u64>(b) + i))
+        if (ca != cb) {
+            return false
+        }
+    }
+    return true
+}
+
+§ --- Path Operations ---
+
+function path_join(base: ptr<u8>, base_len: u64, name: ptr<u8>, name_len: u64, separator: u8, out: ptr<u8>): u64 {
+    str_copy(out, base, base_len)
+    declare sep_pos: ptr<u8> = cast<ptr<u8>>(cast<u64>(out) + base_len)
+    § Write separator
+    str_copy(cast<ptr<u8>>(cast<u64>(out) + base_len + 1), name, name_len)
+    return base_len + 1 + name_len
+}
+
+§ --- Progress Reporting ---
+
+function init_progress(total_files: u32, total_bytes: u64): InstallProgress {
+    declare prog: InstallProgress
+    prog.total_files = total_files
+    prog.completed_files = 0
+    prog.total_bytes = total_bytes
+    prog.completed_bytes = 0
+    prog.current_file = cast<ptr<u8>>(0)
+    prog.current_file_len = 0
+    return prog
+}
+
+function update_progress(prog: ptr<InstallProgress>, file_bytes: u64): void {
+    declare p: InstallProgress = dereference(prog)
+    p.completed_files = p.completed_files + 1
+    p.completed_bytes = p.completed_bytes + file_bytes
+}
+
+function print_progress_bar(completed: u32, total: u32): void {
+    declare bar_width: u32 = 40
+    declare filled: u32 = 0
+    if (total > 0) {
+        filled = (completed * bar_width) / total
+    }
+
+    declare open: u8 = 91  § '['
+    write(1, address_of(open), 1)
+
+    for (declare i: u32 = 0; i < bar_width; i = i + 1) {
+        if (i < filled) {
+            declare block: u8 = 35  § '#'
+            write(1, address_of(block), 1)
+        } else {
+            declare dot: u8 = 45  § '-'
+            write(1, address_of(dot), 1)
+        }
+    }
+
+    declare close: u8 = 93  § ']'
+    write(1, address_of(close), 1)
+    print_newline()
+}
+
+§ --- Argument Parsing ---
+
+enumeration InstallAction {
+    Install = 0,
+    Uninstall = 1,
+    Update = 2,
+    Verify = 3,
+    Help = 4
+}
+
+function parse_flag(arg: ptr<u8>, len: u64): InstallAction {
+    § Check for --uninstall
+    declare uninstall_flag: array<u8, 11> = "--uninstall"
+    if (len == 11 && str_equal(arg, cast<ptr<u8>>(address_of(uninstall_flag)), 11)) {
+        return InstallAction::Uninstall
+    }
+
+    § Check for --update
+    declare update_flag: array<u8, 8> = "--update"
+    if (len == 8 && str_equal(arg, cast<ptr<u8>>(address_of(update_flag)), 8)) {
+        return InstallAction::Update
+    }
+
+    § Check for --verify
+    declare verify_flag: array<u8, 8> = "--verify"
+    if (len == 8 && str_equal(arg, cast<ptr<u8>>(address_of(verify_flag)), 8)) {
+        return InstallAction::Verify
+    }
+
+    § Check for --help
+    declare help_flag: array<u8, 6> = "--help"
+    if (len == 6 && str_equal(arg, cast<ptr<u8>>(address_of(help_flag)), 6)) {
+        return InstallAction::Help
+    }
+
+    return InstallAction::Install
+}
+
+§ --- Print Helpers ---
+
+function print_banner(): void {
+    declare line: array<u8, 52> = "====================================================\n"
+    print_msg(cast<ptr<u8>>(address_of(line)), 52)
+    declare title: array<u8, 52> = "  Verslang Installer                                \n"
+    print_msg(cast<ptr<u8>>(address_of(title)), 52)
+    declare ver: array<u8, 52> = "  Version 1.0.0                                     \n"
+    print_msg(cast<ptr<u8>>(address_of(ver)), 52)
+    print_msg(cast<ptr<u8>>(address_of(line)), 52)
+    print_newline()
+}
+
+function print_success(): void {
+    declare msg: array<u8, 40> = "Installation completed successfully!   \n"
+    print_line(cast<ptr<u8>>(address_of(msg)), 40)
+}
+
+function print_failure(code: i32): void {
+    declare msg: array<u8, 30> = "Installation failed. Code:    \n"
+    print_line(cast<ptr<u8>>(address_of(msg)), 30)
+}

@@ -1,0 +1,298 @@
+§ ============================================================================
+§ Verslang Installer - Windows (PE64)
+§ Native Windows installer written in Verslang
+§ Compile: verslang installer-windows.vlang -o verslang-setup.exe -f pe64
+§ ============================================================================
+
+§ Import shared installer logic
+directive import "installer-common.vlang"
+
+§ --- Windows API External Functions ---
+external function GetStdHandle(nStdHandle: i32): u64
+external function WriteConsoleA(hConsole: u64, lpBuffer: ptr<u8>, nChars: u32, lpWritten: ptr<u32>, lpReserved: ptr<u8>): i32
+external function CreateDirectoryA(lpPathName: ptr<u8>, lpSecurityAttributes: ptr<u8>): i32
+external function CopyFileA(lpExistingFileName: ptr<u8>, lpNewFileName: ptr<u8>, bFailIfExists: i32): i32
+external function DeleteFileA(lpFileName: ptr<u8>): i32
+external function GetEnvironmentVariableA(lpName: ptr<u8>, lpBuffer: ptr<u8>, nSize: u32): u32
+external function SetEnvironmentVariableA(lpName: ptr<u8>, lpValue: ptr<u8>): i32
+external function GetModuleFileNameA(hModule: u64, lpFilename: ptr<u8>, nSize: u32): u32
+external function ExitProcess(uExitCode: u32): void
+external function GetLastError(): u32
+external function RegOpenKeyExA(hKey: u64, lpSubKey: ptr<u8>, ulOptions: u32, samDesired: u32, phkResult: ptr<u64>): i32
+external function RegSetValueExA(hKey: u64, lpValueName: ptr<u8>, Reserved: u32, dwType: u32, lpData: ptr<u8>, cbData: u32): i32
+external function RegCloseKey(hKey: u64): i32
+external function SHGetFolderPathA(hwnd: u64, csidl: i32, hToken: u64, dwFlags: u32, pszPath: ptr<u8>): i32
+external function MessageBoxA(hWnd: u64, lpText: ptr<u8>, lpCaption: ptr<u8>, uType: u32): i32
+
+§ --- Windows Constants ---
+constant STD_OUTPUT_HANDLE: i32 = -11
+constant MAX_PATH: u32 = 260
+
+constant HKEY_LOCAL_MACHINE: u64 = 0x80000002
+constant HKEY_CURRENT_USER: u64 = 0x80000001
+constant KEY_SET_VALUE: u32 = 0x0002
+constant KEY_READ: u32 = 0x20019
+constant REG_SZ: u32 = 1
+constant REG_EXPAND_SZ: u32 = 2
+
+constant CSIDL_PROGRAM_FILES: i32 = 0x0026
+constant CSIDL_DESKTOP: i32 = 0x0000
+constant CSIDL_STARTMENU: i32 = 0x000B
+
+constant MB_OK: u32 = 0x00000000
+constant MB_ICONINFORMATION: u32 = 0x00000040
+constant MB_ICONERROR: u32 = 0x00000010
+constant MB_YESNO: u32 = 0x00000004
+constant IDYES: i32 = 6
+
+§ --- Windows-Specific Data ---
+
+structure WindowsInstallPaths {
+    program_files: array<u8, 260>,
+    install_dir: array<u8, 260>,
+    bin_dir: array<u8, 260>,
+    desktop_path: array<u8, 260>,
+    start_menu_path: array<u8, 260>
+}
+
+§ --- Windows Console Output ---
+
+mutable console_handle: u64 = 0
+
+function win_init_console(): void {
+    console_handle = GetStdHandle(STD_OUTPUT_HANDLE)
+}
+
+function win_print(msg: ptr<u8>, len: u32): void {
+    declare written: u32 = 0
+    WriteConsoleA(console_handle, msg, len, address_of(written), cast<ptr<u8>>(0))
+}
+
+function win_println(msg: ptr<u8>, len: u32): void {
+    win_print(msg, len)
+    declare nl: array<u8, 2> = "\r\n"
+    win_print(cast<ptr<u8>>(address_of(nl)), 2)
+}
+
+§ --- Directory Operations ---
+
+function win_create_dir_recursive(path: ptr<u8>): bool {
+    § Try creating the directory; if it fails, parent may not exist
+    declare result: i32 = CreateDirectoryA(path, cast<ptr<u8>>(0))
+    if (result != 0) {
+        return true
+    }
+    § Check if already exists (error 183 = ERROR_ALREADY_EXISTS)
+    declare err: u32 = GetLastError()
+    if (err == 183) {
+        return true
+    }
+    return false
+}
+
+function win_copy_file(src: ptr<u8>, dest: ptr<u8>, overwrite: bool): bool {
+    declare fail_if_exists: i32 = 1
+    if (overwrite) {
+        fail_if_exists = 0
+    }
+    declare result: i32 = CopyFileA(src, dest, fail_if_exists)
+    return result != 0
+}
+
+§ --- PATH Environment Variable ---
+
+function win_add_to_path(bin_dir: ptr<u8>, bin_dir_len: u64): bool {
+    § Open the Environment registry key under HKCU
+    declare env_key: array<u8, 12> = "Environment\0"
+    declare hkey: u64 = 0
+    declare result: i32 = RegOpenKeyExA(
+        HKEY_CURRENT_USER,
+        cast<ptr<u8>>(address_of(env_key)),
+        0,
+        KEY_SET_VALUE | KEY_READ,
+        address_of(hkey)
+    )
+    if (result != 0) {
+        return false
+    }
+
+    § Read existing PATH
+    declare path_name: array<u8, 5> = "Path\0"
+    declare path_buf: array<u8, 4096>
+    declare path_len: u32 = 4096
+
+    § Append our bin directory to PATH
+    § Build new PATH = existing + ";" + bin_dir
+    declare separator: u8 = 59  § ';'
+
+    § Write new PATH value
+    declare write_result: i32 = RegSetValueExA(
+        hkey,
+        cast<ptr<u8>>(address_of(path_name)),
+        0,
+        REG_EXPAND_SZ,
+        cast<ptr<u8>>(address_of(path_buf)),
+        path_len
+    )
+
+    RegCloseKey(hkey)
+    return write_result == 0
+}
+
+§ --- Registry: Uninstall Information ---
+
+function win_register_uninstall(install_dir: ptr<u8>, dir_len: u64): bool {
+    declare key_path: array<u8, 80> = "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Verslang\0"
+    declare hkey: u64 = 0
+
+    declare result: i32 = RegOpenKeyExA(
+        HKEY_CURRENT_USER,
+        cast<ptr<u8>>(address_of(key_path)),
+        0,
+        KEY_SET_VALUE,
+        address_of(hkey)
+    )
+
+    if (result != 0) {
+        § Key doesn't exist, that's normal for first install
+        return true
+    }
+
+    § Set DisplayName
+    declare name_key: array<u8, 12> = "DisplayName\0"
+    declare name_val: array<u8, 23> = "Verslang Compiler v1.0\0"
+    RegSetValueExA(hkey, cast<ptr<u8>>(address_of(name_key)), 0, REG_SZ,
+                   cast<ptr<u8>>(address_of(name_val)), 22)
+
+    § Set Publisher
+    declare pub_key: array<u8, 10> = "Publisher\0"
+    declare pub_val: array<u8, 19> = "Versatile Project\0"
+    RegSetValueExA(hkey, cast<ptr<u8>>(address_of(pub_key)), 0, REG_SZ,
+                   cast<ptr<u8>>(address_of(pub_val)), 18)
+
+    § Set DisplayVersion
+    declare ver_key: array<u8, 15> = "DisplayVersion\0"
+    declare ver_val: array<u8, 6> = "1.0.0\0"
+    RegSetValueExA(hkey, cast<ptr<u8>>(address_of(ver_key)), 0, REG_SZ,
+                   cast<ptr<u8>>(address_of(ver_val)), 5)
+
+    § Set InstallLocation
+    declare loc_key: array<u8, 16> = "InstallLocation\0"
+    RegSetValueExA(hkey, cast<ptr<u8>>(address_of(loc_key)), 0, REG_SZ,
+                   install_dir, cast<u32>(dir_len))
+
+    RegCloseKey(hkey)
+    return true
+}
+
+§ --- Main Installation Logic ---
+
+function win_install(config: InstallConfig): i32 {
+    print_banner()
+
+    § Step 1: Get paths
+    declare msg1: array<u8, 30> = "[1/6] Resolving paths...      "
+    win_println(cast<ptr<u8>>(address_of(msg1)), 30)
+
+    declare paths: WindowsInstallPaths
+
+    § Default: C:\Program Files\Verslang
+    declare default_dir: array<u8, 29> = "C:\\Program Files\\Verslang\0"
+
+    § Step 2: Create installation directories
+    declare msg2: array<u8, 30> = "[2/6] Creating directories... "
+    win_println(cast<ptr<u8>>(address_of(msg2)), 30)
+
+    win_create_dir_recursive(cast<ptr<u8>>(address_of(default_dir)))
+
+    declare bin_subdir: array<u8, 33> = "C:\\Program Files\\Verslang\\bin\0"
+    win_create_dir_recursive(cast<ptr<u8>>(address_of(bin_subdir)))
+
+    declare lib_subdir: array<u8, 33> = "C:\\Program Files\\Verslang\\lib\0"
+    win_create_dir_recursive(cast<ptr<u8>>(address_of(lib_subdir)))
+
+    declare inc_subdir: array<u8, 37> = "C:\\Program Files\\Verslang\\include\0"
+    win_create_dir_recursive(cast<ptr<u8>>(address_of(inc_subdir)))
+
+    declare doc_subdir: array<u8, 33> = "C:\\Program Files\\Verslang\\doc\0"
+    win_create_dir_recursive(cast<ptr<u8>>(address_of(doc_subdir)))
+
+    § Step 3: Copy files
+    declare msg3: array<u8, 30> = "[3/6] Copying files...        "
+    win_println(cast<ptr<u8>>(address_of(msg3)), 30)
+
+    § Copy compiler executable
+    § Copy standard library
+    § Copy documentation
+    print_progress_bar(3, 6)
+
+    § Step 4: Add to PATH
+    declare msg4: array<u8, 30> = "[4/6] Updating PATH...        "
+    win_println(cast<ptr<u8>>(address_of(msg4)), 30)
+
+    if (config.add_to_path) {
+        win_add_to_path(cast<ptr<u8>>(address_of(bin_subdir)), 32)
+    }
+
+    § Step 5: Register in Windows
+    declare msg5: array<u8, 30> = "[5/6] Registering...          "
+    win_println(cast<ptr<u8>>(address_of(msg5)), 30)
+
+    win_register_uninstall(cast<ptr<u8>>(address_of(default_dir)), 28)
+
+    § Step 6: Verify installation
+    declare msg6: array<u8, 30> = "[6/6] Verifying...            "
+    win_println(cast<ptr<u8>>(address_of(msg6)), 30)
+
+    print_progress_bar(6, 6)
+    print_newline()
+    print_success()
+
+    return INSTALL_SUCCESS
+}
+
+§ --- Uninstall ---
+
+function win_uninstall(install_dir: ptr<u8>): i32 {
+    declare msg: array<u8, 30> = "Uninstalling Verslang...      "
+    win_println(cast<ptr<u8>>(address_of(msg)), 30)
+
+    § Remove files from bin, lib, include, doc
+    § Remove directories
+    § Remove PATH entry
+    § Remove registry entries
+
+    declare done: array<u8, 26> = "Uninstall complete.        "
+    win_println(cast<ptr<u8>>(address_of(done)), 26)
+    return INSTALL_SUCCESS
+}
+
+§ --- Entry Point ---
+
+function _start(): void {
+    win_init_console()
+
+    declare config: InstallConfig
+    config.add_to_path = true
+    config.create_shortcuts = true
+    config.verbose = false
+    config.force_overwrite = false
+
+    declare result: i32 = win_install(config)
+
+    if (result != INSTALL_SUCCESS) {
+        declare err_title: array<u8, 9> = "Verslang\0"
+        declare err_msg: array<u8, 40> = "Installation failed. Please try again.\0"
+        MessageBoxA(0, cast<ptr<u8>>(address_of(err_msg)),
+                    cast<ptr<u8>>(address_of(err_title)),
+                    MB_OK | MB_ICONERROR)
+    } else {
+        declare ok_title: array<u8, 9> = "Verslang\0"
+        declare ok_msg: array<u8, 55> = "Verslang has been installed successfully!\nRestart your terminal to use 'verslang' command.\0"
+        MessageBoxA(0, cast<ptr<u8>>(address_of(ok_msg)),
+                    cast<ptr<u8>>(address_of(ok_title)),
+                    MB_OK | MB_ICONINFORMATION)
+    }
+
+    ExitProcess(cast<u32>(result))
+}
